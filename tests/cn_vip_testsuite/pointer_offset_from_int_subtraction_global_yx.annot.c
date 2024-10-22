@@ -21,12 +21,12 @@ int main()
 #endif
   int *q = &y;
 
-  /*CN_VIP*/unsigned char *p_bytes = owned_int_ptr_to_owned_uchar_arr(&p);
-  /*CN_VIP*/unsigned char *q_bytes = owned_int_ptr_to_owned_uchar_arr(&q);
+  /*CN_VIP*//*@ to_bytes Owned<int*>(&p); @*/
+  /*CN_VIP*//*@ to_bytes Owned<int*>(&q); @*/
 
-  /*CN_VIP*/int result = _memcmp(p_bytes, q_bytes, sizeof(p));
-  /*CN_VIP*//*@ apply byte_ptr_to_int_ptr_ptr(p_bytes); @*/
-  /*CN_VIP*//*@ apply byte_ptr_to_int_ptr_ptr(q_bytes); @*/
+  /*CN_VIP*/int result = _memcmp((unsigned char*)&p, (unsigned char*)&q, sizeof(p));
+  /*CN_VIP*//*@ from_bytes Owned<int*>(&p); @*/
+  /*CN_VIP*//*@ from_bytes Owned<int*>(&q); @*/
   if (result == 0) {
     *p = 11; // is this free of UB?
     //CN_VIP printf("x=%d y=%d *p=%d *q=%d\n",x,y,*p,*q);

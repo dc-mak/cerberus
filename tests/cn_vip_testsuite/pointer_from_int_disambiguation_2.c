@@ -13,15 +13,17 @@ int main()
   int *q = &y;
   uintptr_t i = (uintptr_t)p;
   uintptr_t j = (uintptr_t)q;
-  /*CN_VIP*/ unsigned char *p_bytes = owned_int_ptr_to_owned_uchar_arr(&p);
-  /*CN_VIP*/ unsigned char *q_bytes = owned_int_ptr_to_owned_uchar_arr(&q);
-  if (_memcmp(p_bytes, q_bytes, sizeof(p)) == 0) {
-    int *r = (int *)i;
+  /*CN_VIP*//*@ to_bytes Owned<int*>(&p); @*/
+  /*CN_VIP*//*@ to_bytes Owned<int*>(&q); @*/
+  if (_memcmp((unsigned char*)&p, (unsigned char*)&q, sizeof(p)) == 0) {
+    /*CN_VIP*//*@ from_bytes Owned<int*>(&p); @*/
+    /*CN_VIP*//*@ from_bytes Owned<int*>(&q); @*/
+    /*CN_VIP*/int *r = __cerbvar_copy_alloc_id(i, &x); // TODO remove copy alloc id
     r=r-1;  // is this free of UB?
     *r=11;  // and this?
     //CN_VIP printf("x=%d y=%d *q=%d *r=%d\n",x,y,*q,*r);
     /*CN_VIP*//*@ assert (x == 11i32 && y == 2i32 && *q == 2i32 && *r == 11i32); @*/
   }
-  /*CN_VIP*//*@ apply byte_ptr_to_int_ptr_ptr(p_bytes); @*/
-  /*CN_VIP*//*@ apply byte_ptr_to_int_ptr_ptr(q_bytes); @*/
+  /*CN_VIP*//*@ from_bytes Owned<int*>(&p); @*/
+  /*CN_VIP*//*@ from_bytes Owned<int*>(&q); @*/
 }

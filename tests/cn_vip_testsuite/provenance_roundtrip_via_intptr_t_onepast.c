@@ -13,7 +13,8 @@ requires
   int *p = &x;
   p=p+1;
   intptr_t i = (intptr_t)p;
-  int *q = (int *)i;
+  /*CN_VIP*/int *q = __cerbvar_copy_alloc_id((uintptr_t)i, p); // TODO remove copy alloc id
+  /*@ assert ((alloc_id) q == (alloc_id)p); @*/ // <-- fails because of this
   q=q-1;
   *q = 11; // is this free of undefined behaviour?
   //CN_VIP printf("*q=%d\n",*q);

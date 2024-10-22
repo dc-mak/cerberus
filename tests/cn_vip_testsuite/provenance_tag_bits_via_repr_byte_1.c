@@ -32,7 +32,8 @@ requires
 {
   int *p=&x, *q=&x;
   // read low-order (little endian) representation byte of p
-  unsigned char* p_char = int_ptr_ptr_byte_ptr(&p);
+  /*CN_VIP*//*@ to_bytes Owned<int*>(&p); @*/
+  unsigned char* p_char = (unsigned char*)&p;
   /*@ extract Owned<unsigned char>, 0u64; @*/
   unsigned char i = *p_char;
   // check the bottom two bits of an int* are not usec
@@ -46,6 +47,8 @@ requires
   // clear the low-order bits again
   *(unsigned char*)&p = (*(unsigned char*)&p) & ~((unsigned char)3u);
   // are p and q now equivalent?
+  /*CN_VIP*//*@ from_bytes Owned<int*>(&p); @*/
+  /*@ assert ((alloc_id)p == (alloc_id)q); @*/ // <-- fails because of this
   *p = 11;          // does this have defined behaviour?
   _Bool b = (p==q); // is this true?
   //CN_VIP printf("x=%i *p=%i (p==q)=%s\n",x,*p,b?"true":"false");
