@@ -211,7 +211,8 @@ type message =
         model : Solver.model_with_q
       }
   | Allocation_not_live of
-      { reason : [ `Copy_alloc_id | `Ptr_cmp | `Ptr_diff | `ISO_array_shift ];
+      { reason :
+          [ `Copy_alloc_id | `Ptr_cmp | `Ptr_diff | `ISO_array_shift | `ISO_member_shift ];
         ptr : IT.t;
         ctxt : Context.t * log;
         model_constr : (Solver.model_with_q * IT.t) option
@@ -525,6 +526,7 @@ let pp_message te =
       | `Ptr_diff -> "pointer difference"
       | `Ptr_cmp -> "pointer comparison"
       | `ISO_array_shift -> "array shift"
+      | `ISO_member_shift -> "member shift"
     in
     let short =
       !^"Pointer " ^^ bquotes (IT.pp ptr) ^^^ !^"needs to be live for" ^^^ !^reason

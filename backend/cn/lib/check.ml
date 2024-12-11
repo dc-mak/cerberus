@@ -590,7 +590,12 @@ let rec check_pexpr (pe : BT.t Mu.pexpr) (k : IT.t -> unit m) : unit m =
            in
            let unspec = CF.Undefined.UB_unspec_pointer_add in
            let@ () = check_has_alloc_id loc vt1 unspec in
-           let@ () = check_alloc_bounds loc ~ptr:result unspec in
+           let@ () =
+             if CF.Switches.has_strict_pointer_arith () then
+               check_alloc_bounds loc ~ptr:result unspec
+             else
+               return ()
+           in
            k result))
      | PEmember_shift (pe, tag, member) ->
        let@ () = WellTyped.ensure_base_type loc ~expect (Loc ()) in
@@ -601,7 +606,12 @@ let rec check_pexpr (pe : BT.t Mu.pexpr) (k : IT.t -> unit m) : unit m =
          let@ () = check_has_alloc_id loc vt CF.Undefined.UB_unspec_pointer_add in
          let unspec = CF.Undefined.UB_unspec_pointer_add in
          let@ () = check_has_alloc_id loc vt unspec in
-         let@ () = check_alloc_bounds loc ~ptr:result unspec in
+         let@ () =
+           if CF.Switches.has_strict_pointer_arith () then
+             check_alloc_bounds loc ~ptr:result unspec
+           else
+             return ()
+         in
          k result)
      | PEnot pe ->
        let@ () = WellTyped.ensure_base_type loc ~expect Bool in
@@ -1378,6 +1388,12 @@ let rec check_expr labels (e : BT.t Mu.expr) (k : IT.t -> unit m) : unit m =
                 here)
              *)))
        in
+       let in_bounds ~base ~size result =
+         let addr = addr_ result here in
+         let lower = le_ (base, addr) here in
+         let upper = le_ (addr, add_ (base, size) here) here in
+         and_ [ lower; upper ] here
+       in
        let both_in_bounds ~base ~size arg1 arg2 =
          let addr1, addr2 = (addr_ arg1 here, addr_ arg2 here) in
          let lower1, lower2 = (le_ (base, addr1) here, le_ (base, addr2) here) in
@@ -1531,10 +1547,9 @@ let rec check_expr labels (e : BT.t Mu.expr) (k : IT.t -> unit m) : unit m =
               let result =
                 arrayShift_ ~base:vt1 ~index:(cast_ Memory.uintptr_bt vt2 loc) act.ct loc
               in
-              let ub_unspec = CF.Undefined.UB_unspec_pointer_add in
-              let ub = CF.Undefined.(UB_CERB004_unspecified ub_unspec) in
-              let@ () = check_has_alloc_id loc vt1 ub_unspec in
-              let here = Locations.other __FUNCTION__ in
+              let unspec = CF.Undefined.UB_unspec_pointer_add in
+              let ub = CF.Undefined.(UB_CERB004_unspecified unspec) in
+              let@ () = check_has_alloc_id loc vt1 unspec in
               let@ () =
                 check_live_alloc_bounds
                   `ISO_array_shift
@@ -1542,17 +1557,29 @@ let rec check_expr labels (e : BT.t Mu.expr) (k : IT.t -> unit m) : unit m =
                   vt1
                   ub
                   result
-                  (fun ~base ~size ->
-                     let addr = addr_ result here in
-                     let lower = le_ (base, addr) here in
-                     let upper = le_ (addr, add_ (base, size) here) here in
-                     and_ [ lower; upper ] here)
+                  (in_bounds result)
               in
               k result))
-        | PtrMemberShift (_tag_sym, _memb_ident, _pe) ->
-          (* FIXME(CHERI merge) *)
-          (* there is now an effectful variant of the member shift operator (which is UB when creating an out of bound pointer) *)
-          Cerb_debug.error "todo: PtrMemberShift"
+        | PtrMemberShift (tag, member, pe) ->
+          let@ () = WellTyped.ensure_base_type loc ~expect (Loc ()) in
+          let@ () = ensure_base_type loc ~expect:(Loc ()) (Mu.bt_of_pexpr pe) in
+          check_pexpr pe (fun vt ->
+            let@ _ = get_struct_member_type loc tag member in
+            let result = memberShift_ (vt, tag, member) loc in
+            let@ () = check_has_alloc_id loc vt CF.Undefined.UB_unspec_pointer_add in
+            let unspec = CF.Undefined.UB_unspec_pointer_add in
+            let@ () = check_has_alloc_id loc vt unspec in
+            let ub = CF.Undefined.(UB_CERB004_unspecified unspec) in
+            let@ () =
+              check_live_alloc_bounds
+                `ISO_member_shift
+                loc
+                vt
+                ub
+                result
+                (in_bounds result)
+            in
+            k result)
         | CopyAllocId (pe1, pe2) ->
           let@ () =
             WellTyped.ensure_base_type loc ~expect:Memory.uintptr_bt (Mu.bt_of_pexpr pe1)
