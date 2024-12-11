@@ -431,15 +431,20 @@ let check_has_alloc_id loc ptr ub_unspec =
     return ()
 
 
+let in_bounds result ~base ~size =
+  let here = Locations.other __FUNCTION__ in
+  let addr = addr_ result here in
+  let lower = le_ (base, addr) here in
+  let upper = le_ (addr, add_ (base, size) here) here in
+  and_ [ lower; upper ] here
+
+
 let check_alloc_bounds loc ~ptr ub_unspec =
-  if !use_vip then (
-    let here = Locations.other __FUNCTION__ in
+  if !use_vip then
     let module H = Alloc.History in
+    let here = Locations.other __FUNCTION__ in
     let H.{ base; size } = H.(split (lookup_ptr ptr here) here) in
-    let addr = addr_ ptr here in
-    let lower = le_ (base, addr) here in
-    let upper = le_ (addr, add_ (base, size) here) here in
-    let constr = and_ [ lower; upper ] here in
+    let constr = in_bounds ptr ~base ~size in
     let@ provable = provable loc in
     match provable @@ LC.T constr with
     | `True -> return ()
@@ -447,7 +452,7 @@ let check_alloc_bounds loc ~ptr ub_unspec =
       let@ model = model () in
       let ub = CF.Undefined.(UB_CERB004_unspecified ub_unspec) in
       fail (fun ctxt ->
-        { loc; msg = Alloc_out_of_bounds { constr; term = ptr; ub; ctxt; model } }))
+        { loc; msg = Alloc_out_of_bounds { constr; term = ptr; ub; ctxt; model } })
   else
     return ()
 
@@ -1347,13 +1352,13 @@ let rec check_expr labels (e : BT.t Mu.expr) (k : IT.t -> unit m) : unit m =
              in
              let@ provable = provable loc in
              let@ () =
-               match provable @@ LC.T ambiguous with
-               | `False -> return ()
-               | `True ->
+               match provable @@ LC.T (not_ ambiguous here) with
+               | `True -> return ()
+               | `False ->
                  let msg =
                    Printf.sprintf
-                     "ambiguous pointer %sequality case: addresses equal, but \
-                      provenances differ"
+                     "Cannot rule out ambiguous pointer %sequality case: addresses \
+                      equal, but provenances differ"
                      case
                  in
                  warn loc !^msg;
@@ -1388,20 +1393,10 @@ let rec check_expr labels (e : BT.t Mu.expr) (k : IT.t -> unit m) : unit m =
                 here)
              *)))
        in
-       let in_bounds ~base ~size result =
-         let addr = addr_ result here in
-         let lower = le_ (base, addr) here in
-         let upper = le_ (addr, add_ (base, size) here) here in
-         and_ [ lower; upper ] here
-       in
        let both_in_bounds ~base ~size arg1 arg2 =
-         let addr1, addr2 = (addr_ arg1 here, addr_ arg2 here) in
-         let lower1, lower2 = (le_ (base, addr1) here, le_ (base, addr2) here) in
-         let upper1, upper2 =
-           ( le_ (addr1, add_ (base, size) here) here,
-             le_ (addr2, add_ (base, size) here) here )
-         in
-         and_ [ lower1; lower2; upper1; upper2 ] here
+         let constr1 = in_bounds arg1 ~base ~size in
+         let constr2 = in_bounds arg2 ~base ~size in
+         and_ [ constr1; constr2 ] here
        in
        let pointer_op op pe1 pe2 =
          let ub = CF.Undefined.UB053_distinct_aggregate_union_pointer_comparison in
