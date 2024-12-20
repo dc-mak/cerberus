@@ -233,9 +233,15 @@ let declare_bt_uninterpreted s (name, k) bt args_ts res_t =
    when we need them, with another piece of state in the solver to track which ones we
    have declared. *)
 module CN_Tuple = struct
-  let name arity = "cn_tuple_" ^ string_of_int arity
+  let default_arity = 12
+
+  let name arity =
+    assert (arity <= default_arity);
+    "cn_tuple_" ^ string_of_int arity
+
 
   let selector arity field =
+    assert (arity <= default_arity);
     "cn_get_" ^ string_of_int field ^ "_of_" ^ string_of_int arity
 
 
@@ -246,18 +252,21 @@ module CN_Tuple = struct
 
 
   (** Declare a datatype for a struct *)
-  let declare s arity =
-    let name = name arity in
-    let param i = "a" ^ string_of_int i in
-    let params = List.init arity param in
-    let field i = (selector arity i, SMT.atom (param i)) in
-    let fields = List.init arity field in
-    ack_command s (SMT.declare_datatype name params [ (name, fields) ])
+  let declare s =
+    for arity = 0 to default_arity do
+      let name = name arity in
+      let param i = "a" ^ string_of_int i in
+      let params = List.init arity param in
+      let field i = (selector arity i, SMT.atom (param i)) in
+      let fields = List.init arity field in
+      ack_command s (SMT.declare_datatype name params [ (name, fields) ])
+    done
 
 
   (** Make a tuple value *)
   let con es =
     let arity = List.length es in
+    assert (arity <= default_arity);
     SMT.app_ (name arity) es
 
 
@@ -1181,9 +1190,7 @@ let rec declare_struct s done_struct name decl =
 
 (** Declare various types always available to the solver. *)
 let declare_solver_basics s =
-  for arity = 0 to 8 do
-    CN_Tuple.declare s arity
-  done;
+  CN_Tuple.declare s;
   CN_List.declare s;
   CN_MemByte.declare s;
   CN_Pointer.declare s;
