@@ -561,6 +561,19 @@ let core_passes (conf, io) ~filename core_file =
       Remove_unspecs.rewrite_file core_file
     else
       core_file in
+  (* Emit CFG JSON if requested. *)
+  let () =
+    if Switches.has_switch SW_cfg then begin
+      let cfgs = Core_cfg.analyse_file core_file in
+      let base = Filename.remove_extension (Filename.basename filename) in
+      let out_path = base ^ ".cfg.json" in
+      let oc = open_out out_path in
+      let fmt = Format.formatter_of_out_channel oc in
+      Core_cfg.pp_json fmt cfgs;
+      Format.pp_print_flush fmt ();
+      close_out oc
+    end
+  in
   Core_indet.hackish_order <$> begin
     if conf.sequentialise_core || conf.typecheck_core then
       typed_core_passes (conf, io) core_file >>= fun (core_file, typed_core_file) ->
