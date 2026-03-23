@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Core CFG</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    body { margin: 0; font-family: monospace; background: #1e1e1e; color: #d4d4d4; overflow: hidden; }
+
+    #header {
+      height: 40px;
+      padding: 0 16px;
+      background: #252526;
+      border-bottom: 1px solid #3c3c3c;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+    #header h1 { margin: 0; font-size: 13px; font-weight: bold; color: #ccc; }
+    #fn-info { font-size: 11px; color: #888; }
+
+    #legend {
+      display: flex;
+      gap: 14px;
+      font-size: 11px;
+      margin-left: auto;
+    }
+    .legend-item { display: flex; align-items: center; gap: 5px; }
+    .legend-swatch { width: 22px; height: 3px; border-radius: 2px; }
+
+    label.file-btn {
+      cursor: pointer;
+      background: #3c3c3c;
+      border: 1px solid #555;
+      padding: 3px 10px;
+      font-family: monospace;
+      font-size: 12px;
+      color: #d4d4d4;
+      white-space: nowrap;
+    }
+    label.file-btn:hover { background: #4a4a4a; }
+    #file-input { display: none; }
+
+    select {
+      background: #3c3c3c;
+      color: #d4d4d4;
+      border: 1px solid #555;
+      padding: 2px 6px;
+      font-family: monospace;
+      font-size: 12px;
+    }
+
+    #cy { width: 100vw; height: calc(100vh - 40px); }
+
+    #message {
+      position: absolute;
+      top: 40px; left: 0; right: 0; bottom: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      pointer-events: none;
+    }
+    #message-box {
+      max-width: 560px;
+      padding: 20px 28px;
+      border-radius: 4px;
+      font-size: 13px;
+      line-height: 1.6;
+      white-space: pre-wrap;
+    }
+    #message-box.hint  { color: #888; }
+    #message-box.error { background: #2a1010; border: 1px solid #a33; color: #f88; }
+  </style>
+</head>
+<body>
+<div id="header">
+  <h1>Core CFG</h1>
+  <button class="file-btn" id="open-btn">Open .cfg.json&#8230;</button>
+  <input type="file" id="file-input" accept=".json,.cfg.json" style="display:none">
+  <select id="fn-select" style="display:none"></select>
+  <span id="fn-info"></span>
+  <div id="legend">
+    <div class="legend-item"><div class="legend-swatch" style="background:#777"></div>seq</div>
+    <div class="legend-item"><div class="legend-swatch" style="background:#4ec94e"></div>if-true</div>
+    <div class="legend-item"><div class="legend-swatch" style="background:#e05555"></div>if-false</div>
+    <div class="legend-item"><div class="legend-swatch" style="background:#e09a30"></div>run</div>
+  </div>
+</div>
+<div id="cy"></div>
+<div id="message"><div id="message-box" class="hint">Open a .cfg.json file to visualise its control-flow graph.</div></div>
+
+<script src="https://unpkg.com/cytoscape@3.26.0/dist/cytoscape.min.js"></script>
+<script src="https://unpkg.com/dagre@0.8.5/dist/dagre.min.js"></script>
+<script src="https://unpkg.com/cytoscape-dagre@2.4.0/cytoscape-dagre.js"></script>
+<script>
+
+// ── validation ────────────────────────────────────────────────────────────────
+
+function validate(data) {
+  if (!Array.isArray(data))
+    return 'Expected a JSON array at the top level.';
+  if (data.length === 0)
+    return 'Array is empty — no functions found.';
+  for (let i = 0; i < data.length; i++) {
+    const fn = data[i];
+    const fp = `functions[${i}]`;
+    if (typeof fn.name   !== 'string') return `${fp}: "name" must be a string.`;
+    if (typeof fn.entry  !== 'string') return `${fp} ("${fn.name}"): "entry" must be a string.`;
+    if (!Array.isArray(fn.nodes))      return `${fp} ("${fn.name}"): "nodes" must be an array.`;
+    if (!Array.isArray(fn.edges))      return `${fp} ("${fn.name}"): "edges" must be an array.`;
+
+    const nodeIds = new Set();
+    for (let j = 0; j < fn.nodes.length; j++) {
+      const nd = fn.nodes[j];
+      const np = `${fp}.nodes[${j}]`;
+      if (typeof nd.id !== 'string')  return `${np}: "id" must be a string.`;
+      if (!Array.isArray(nd.stmts))   return `${np}: "stmts" must be an array.`;
+      for (let k = 0; k < nd.stmts.length; k++) {
+        const st = nd.stmts[k];
+        const sp = `${np}.stmts[${k}]`;
+        if (typeof st.text !== 'string') return `${sp}: "text" must be a string.`;
+        if (typeof st.loc  !== 'string') return `${sp}: "loc" must be a string.`;
+      }
+      nodeIds.add(nd.id);
+    }
+
+    if (!nodeIds.has(fn.entry))
+      return `${fp} ("${fn.name}"): entry node "${fn.entry}" does not appear in nodes.`;
+
+    for (let j = 0; j < fn.edges.length; j++) {
+      const ed = fn.edges[j];
+      const ep = `${fp}.edges[${j}]`;
+      if (typeof ed.from  !== 'string') return `${ep}: "from" must be a string.`;
+      if (typeof ed.to    !== 'string') return `${ep}: "to" must be a string.`;
+      if (typeof ed.label !== 'string') return `${ep}: "label" must be a string.`;
+      if (!nodeIds.has(ed.from)) return `${ep}: "from" node "${ed.from}" not found in nodes.`;
+      if (!nodeIds.has(ed.to))   return `${ep}: "to" node "${ed.to}" not found in nodes.`;
+    }
+  }
+  return null;
+}
+
+// ── message display ───────────────────────────────────────────────────────────
+
+const msgBox = document.getElementById('message-box');
+const msgEl  = document.getElementById('message');
+
+function showError(text) {
+  msgBox.className = 'error';
+  msgBox.textContent = text;
+  msgEl.style.display = 'flex';
+}
+
+function hideMessage() {
+  msgEl.style.display = 'none';
+}
+
+// ── file loading ──────────────────────────────────────────────────────────────
+
+let lastHandle = null;   // FileSystemFileHandle — reused as startIn on next open
+
+async function openFile() {
+  if (window.showOpenFilePicker) {
+    let handle;
+    try {
+      const opts = {
+        types: [{ description: 'CFG JSON', accept: { 'application/json': ['.json'] } }],
+        multiple: false,
+      };
+      if (lastHandle) opts.startIn = lastHandle;
+      [handle] = await window.showOpenFilePicker(opts);
+    } catch (e) {
+      if (e.name === 'AbortError') return;
+      throw e;
+    }
+    lastHandle = handle;
+    const file = await handle.getFile();
+    loadFromFile(file);
+  } else {
+    document.getElementById('file-input').click();
+  }
+}
+
+function loadFromFile(file) {
+  const reader = new FileReader();
+  reader.onload = ev => {
+    let data;
+    try {
+      data = JSON.parse(ev.target.result);
+    } catch (err) {
+      showError('Invalid JSON: ' + err.message);
+      return;
+    }
+    const err = validate(data);
+    if (err) {
+      showError('Unexpected format:\n\n' + err);
+      return;
+    }
+    loadCFGs(data, file.name);
+  };
+  reader.readAsText(file);
+}
+
+document.getElementById('open-btn').addEventListener('click', openFile);
+
+// Fallback for browsers without showOpenFilePicker (e.g. Safari).
+// Reset value so re-selecting the same file fires 'change' again.
+const fileInput = document.getElementById('file-input');
+fileInput.addEventListener('change', e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  e.target.value = '';
+  loadFromFile(file);
+});
+
+// ── helpers ───────────────────────────────────────────────────────────────────
+
+const EDGE_COLOR = {
+  'seq':      '#777',
+  'if-true':  '#4ec94e',
+  'if-false': '#e05555',
+  'run':      '#e09a30',
+};
+
+// ── graph builder ─────────────────────────────────────────────────────────────
+
+function buildElements(cfg) {
+  const entryId = cfg.entry;
+
+  const nodes = cfg.nodes.map(nd => {
+    const isSave  = nd.stmts.length > 0 && nd.stmts[0].text.startsWith('save (');
+    const isEntry = nd.id === entryId;
+    const label   = nd.stmts.map(s => s.text).join('\n');
+    return { data: { id: nd.id, label, isSave, isEntry } };
+  });
+
+  const edges = cfg.edges.map((ed, i) => ({
+    data: {
+      id: 'e' + i,
+      source: ed.from,
+      target: ed.to,
+      label: ed.label,
+      color: EDGE_COLOR[ed.label] || '#888',
+    }
+  }));
+
+  return [...nodes, ...edges];
+}
+
+// ── render ────────────────────────────────────────────────────────────────────
+
+let cy = null;
+
+function render(cfg) {
+  document.getElementById('fn-info').textContent =
+    cfg.nodes.length + ' nodes \u00b7 ' + cfg.edges.length + ' edges \u00b7 entry: ' + cfg.entry;
+
+  if (cy) cy.destroy();
+
+  cy = cytoscape({
+    container: document.getElementById('cy'),
+    elements: buildElements(cfg),
+    style: [
+      {
+        selector: 'node',
+        style: {
+          shape: 'rectangle',
+          'background-color': '#252526',
+          'border-width': 1,
+          'border-color': '#555',
+          label: 'data(label)',
+          'text-valign': 'center',
+          'text-halign': 'center',
+          'text-justification': 'left',
+          'font-family': 'monospace',
+          'font-size': 11,
+          color: '#d4d4d4',
+          'text-wrap': 'wrap',
+          'text-max-width': 500,
+          padding: 10,
+          width: 'label',
+          height: 'label',
+        }
+      },
+      {
+        selector: 'node[?isEntry]',
+        style: {
+          'border-color': '#569cd6',
+          'border-width': 2,
+          'background-color': '#0d2038',
+        }
+      },
+      {
+        selector: 'node[?isSave]',
+        style: {
+          'border-color': '#c586c0',
+          'border-width': 2,
+          'background-color': '#1e102a',
+        }
+      },
+      {
+        selector: 'node:selected',
+        style: { 'border-color': '#fff', 'border-width': 2 }
+      },
+      {
+        selector: 'edge',
+        style: {
+          width: 1.5,
+          'line-color': 'data(color)',
+          'target-arrow-color': 'data(color)',
+          'target-arrow-shape': 'triangle',
+          'curve-style': 'bezier',
+          label: 'data(label)',
+          'font-size': 10,
+          'font-family': 'monospace',
+          color: '#aaa',
+          'text-background-color': '#1e1e1e',
+          'text-background-opacity': 1,
+          'text-background-padding': '3px',
+        }
+      },
+    ],
+    layout: {
+      name: 'dagre',
+      rankDir: 'TB',
+      nodeSep: 50,
+      rankSep: 80,
+      padding: 40,
+      edgeSep: 10,
+    }
+  });
+}
+
+// ── function selector ─────────────────────────────────────────────────────────
+
+let cfgData = null;
+
+function loadCFGs(data, filename) {
+  cfgData = data;
+  hideMessage();
+  document.title = 'Core CFG — ' + filename;
+
+  const sel = document.getElementById('fn-select');
+  sel.innerHTML = '';
+  data.forEach((cfg, i) => {
+    const opt = document.createElement('option');
+    opt.value = i;
+    opt.textContent = cfg.name;
+    sel.appendChild(opt);
+  });
+  sel.style.display = data.length > 1 ? '' : 'none';
+  sel.value = 0;
+
+  render(data[0]);
+}
+
+document.getElementById('fn-select').addEventListener('change', e => {
+  if (cfgData) render(cfgData[+e.target.value]);
+});
+
+</script>
+</body>
+</html>

@@ -23,15 +23,14 @@ type edge_label =
 (** A single statement within a basic block, retaining its original source
     location and verbatim pretty-printed text. *)
 type stmt = {
-  text : string;
+  text : PPrint.document;
   loc  : string;
 }
 
 (** A basic block node.  After on-the-fly merging, [stmts] contains one or
-    more statements.  [label] is [Some name] for Esave-labeled blocks. *)
+    more statements. *)
 type node = {
   id    : node_id;
-  label : string option;
   stmts : stmt list;
 }
 

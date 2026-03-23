@@ -1,32 +1,35 @@
 open Core
+open Cerb_pp_prelude
 
 (* ===== Helpers ===== *)
 
-(* Pretty-print a PPrint document to a string with colours disabled.
-   Takes a thunk so the document is built *after* do_colour is cleared,
-   preventing fancystring ANSI codes from being embedded during construction. *)
-let pp_to_string mk_doc =
-  Cerb_colour.without_colour (fun () ->
-    let buf = Buffer.create 256 in
-    PPrint.ToBuffer.pretty 0.8 80 buf (mk_doc ());
-    Buffer.contents buf
-  ) ()
+(* Build a PPrint document with colours disabled.  All stmt text fields are
+   constructed via mk_doc so no ANSI fancystring nodes are embedded. *)
+let mk_doc f = Cerb_colour.without_colour f ()
 
-let pp_expr_str expr  = pp_to_string (fun () -> Pp_core.Basic.pp_expr expr)
-let pp_pexpr_str pe   = pp_to_string (fun () -> Pp_core.Basic.pp_pexpr pe)
-let pp_bty_str bty    = pp_to_string (fun () -> Pp_core.Basic.pp_core_base_type bty)
+(* Render a PPrint document to a plain string at JSON output time. *)
+let doc_to_string doc =
+  let buf = Buffer.create 256 in
+  PPrint.ToBuffer.pretty 0.8 80 buf doc;
+  Buffer.contents buf
 
-(* Format the Esave header: "save (k : bty) (x1 = e1; x2 = e2)" *)
+(* Esave header: "save (sym : bty) (x1 = pe1; x2 = pe2)" *)
 let format_esave_header sym bty bindings =
-  let label = Pp_symbol.to_string_pretty sym in
-  let bty_str = pp_bty_str bty in
-  let bindings_str =
-    String.concat "; "
-      (List.map (fun (var_sym, ((_var_bty, _ctype_opt), init_pe)) ->
-        Pp_symbol.to_string_pretty var_sym ^ " = " ^ pp_pexpr_str init_pe
-      ) bindings)
-  in
-  Printf.sprintf "save (%s : %s) (%s)" label bty_str bindings_str
+  mk_doc (fun () ->
+    let label   = PPrint.string (Pp_symbol.to_string_pretty sym) in
+    let bty_doc = Pp_core.Basic.pp_core_base_type bty in
+    let bindings_doc =
+      PPrint.separate (PPrint.string "; ")
+        (List.map (fun (var_sym, ((_, _), init_pe)) ->
+          PPrint.string (Pp_symbol.to_string_pretty var_sym) ^^
+          PPrint.string " = " ^^
+          Pp_core.Basic.pp_pexpr init_pe
+        ) bindings)
+    in
+    PPrint.string "save (" ^^ label ^^
+    PPrint.string " : "    ^^ bty_doc ^^
+    PPrint.string ") ("    ^^ bindings_doc ^^ PPrint.string ")"
+  )
 
 (* ===== CFG types ===== *)
 
@@ -34,11 +37,10 @@ type node_id = Symbol.sym
 
 type edge_label = Seq | IfTrue | IfFalse | Run
 
-type stmt = { text : string; loc : string }
+type stmt = { text : PPrint.document; loc : string }
 
 type node = {
   id    : node_id;
-  label : string option;
   stmts : stmt list;
 }
 
@@ -88,9 +90,9 @@ let add_stmt a s = { a with stmts = a.stmts @ [s] }
 
 (* Emit the block as a node and flush all pending incoming Seq edges.
    PRECONDITION: acc.stmts <> [].  Callers must ensure this. *)
-let flush_acc ?(label=None) ctx acc =
+let flush_acc ctx acc =
   assert (acc.stmts <> []);
-  emit_node ctx { id = acc.id; label; stmts = acc.stmts };
+  emit_node ctx { id = acc.id; stmts = acc.stmts };
   List.iter (fun src ->
     emit_edge ctx { from_id = src; to_id = acc.id; label = Seq }
   ) acc.incoming;
@@ -130,14 +132,37 @@ let rec build_expr ctx acc (Expr (annots, expr_) as expr) =
       let r = build_expr ctx save_acc body in
       { entry = sym; exits = r.exits }
 
-  | Esseq (_, e1, e2) | Ewseq (_, e1, e2) ->
+  | Esseq (pat, e1, e2) | Ewseq (pat, e1, e2) ->
+      let ctor = match expr_ with Ewseq _ -> "let weak" | _ -> "let strong" in
       let r1 = build_expr ctx acc e1 in
+      (* Combine the pattern binding with e1's last stmt in each exit acc,
+         following pp_let from pp_core.ml but omitting "in <body>":
+           let strong/weak pat = e1_doc   (space or line-break before e1_doc) *)
+      let bind_pat a =
+        match List.rev a.stmts with
+        | [] ->
+            add_stmt a { text = mk_doc (fun () ->
+              PPrint.string ctor ^^^ Pp_core.Basic.pp_pattern pat
+            ); loc }
+        | last :: rest ->
+            let combined = mk_doc (fun () ->
+              PPrint.group (
+                (PPrint.string ctor ^^^ Pp_core.Basic.pp_pattern pat ^^^
+                 PPrint.equals) ^//^ last.text
+              )
+            ) in
+            { a with stmts = List.rev ({ last with text = combined } :: rest) }
+      in
+      let r1 = { r1 with exits = List.map bind_pat r1.exits } in
       begin match r1.exits with
       | [] ->
           (* e1 doesn't fall through (e.g. ends in Erun).
              Still traverse e2 to emit any Esave nodes it contains,
-             which may be targets of forward Erun edges. *)
-          ignore (build_expr ctx (fresh_acc ()) e2);
+             which may be targets of forward Erun edges.
+             Flush any open exits from that traversal so Esave nodes whose
+             body falls through are not silently dropped. *)
+          let r2 = build_expr ctx (fresh_acc ()) e2 in
+          List.iter (fun a -> if a.stmts <> [] then ignore (flush_acc ctx a)) r2.exits;
           { entry = r1.entry; exits = [] }
       | [single] ->
           (* Straight-line code: carry the open acc into e2.
@@ -155,7 +180,9 @@ let rec build_expr ctx acc (Expr (annots, expr_) as expr) =
       end
 
   | Eif (cond, et, ef) ->
-      let if_acc = add_stmt acc { text = "if " ^ pp_pexpr_str cond; loc } in
+      let if_acc = add_stmt acc { text = mk_doc (fun () ->
+        PPrint.string "if " ^^ Pp_core.Basic.pp_pexpr cond
+      ); loc } in
       let if_id  = flush_acc ctx if_acc in
       let r_t = build_expr ctx (fresh_acc ()) et in
       let r_f = build_expr ctx (fresh_acc ()) ef in
@@ -164,7 +191,7 @@ let rec build_expr ctx acc (Expr (annots, expr_) as expr) =
       { entry = if_id; exits = r_t.exits @ r_f.exits }
 
   | Erun (_, sym, _args) ->
-      let run_acc = add_stmt acc { text = pp_expr_str expr; loc } in
+      let run_acc = add_stmt acc { text = mk_doc (fun () -> Pp_core.Basic.pp_expr expr); loc } in
       let run_id  = flush_acc ctx run_acc in
       emit_edge ctx { from_id = run_id; to_id = sym; label = Run };
       { entry = run_id; exits = [] }
@@ -172,7 +199,7 @@ let rec build_expr ctx acc (Expr (annots, expr_) as expr) =
   | _ ->
       (* Atomic: Epure, Eaction, Ememop, Ecase, Elet, Eccall, Eproc,
                  Eunseq, End, Epar, Ewait, Eexcluded *)
-      let s = { text = pp_expr_str expr; loc } in
+      let s = { text = mk_doc (fun () -> Pp_core.Basic.pp_expr expr); loc } in
       { entry = acc.id; exits = [add_stmt acc s] }
 
 (* ===== Per-function analysis ===== *)
@@ -220,10 +247,6 @@ let json_escape s =
 
 let json_str s = "\"" ^ json_escape s ^ "\""
 
-let json_str_opt = function
-  | None   -> "null"
-  | Some s -> json_str s
-
 let edge_label_str = function
   | Seq     -> "seq"
   | IfTrue  -> "if-true"
@@ -245,12 +268,11 @@ let pp_json fmt cfgs =
       if ni > 0 then s ",";
       nl_indent 6; s "{";
       nl_indent 8; s ("\"id\": " ^ json_str (Pp_symbol.to_string nd.id) ^ ",");
-      nl_indent 8; s ("\"label\": " ^ json_str_opt nd.label ^ ",");
       nl_indent 8; s "\"stmts\": [";
       List.iteri (fun si st ->
         if si > 0 then s ",";
         nl_indent 10; s "{";
-        nl_indent 12; s ("\"text\": " ^ json_str st.text ^ ",");
+        nl_indent 12; s ("\"text\": " ^ json_str (doc_to_string st.text) ^ ",");
         nl_indent 12; s ("\"loc\": " ^ json_str st.loc);
         nl_indent 10; s "}"
       ) nd.stmts;
