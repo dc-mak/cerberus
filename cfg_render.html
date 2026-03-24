@@ -123,6 +123,7 @@
 <div id="header">
   <h1>Core CFG</h1>
   <button class="file-btn" id="open-btn">Open .cfg.json&#8230;</button>
+  <button class="file-btn" id="reset-btn" style="display:none">Reset layout</button>
   <input type="file" id="file-input" accept=".json,.cfg.json" style="display:none">
   <select id="fn-select" style="display:none"></select>
   <span id="fn-info"></span>
@@ -131,6 +132,12 @@
     <div class="legend-item"><div class="legend-swatch" style="background:#4ec94e"></div>if-true</div>
     <div class="legend-item"><div class="legend-swatch" style="background:#e05555"></div>if-false</div>
     <div class="legend-item"><div class="legend-swatch" style="background:#e09a30"></div>run</div>
+    <div class="legend-item" style="margin-left:8px; border-left:1px solid #444; padding-left:14px">
+      <svg width="22" height="6"><line x1="0" y1="3" x2="22" y2="3" stroke="#aaa" stroke-width="2"/></svg>dom
+    </div>
+    <div class="legend-item">
+      <svg width="22" height="6"><line x1="0" y1="3" x2="22" y2="3" stroke="#aaa" stroke-width="2" stroke-dasharray="5,3"/></svg>non-dom
+    </div>
   </div>
 </div>
 <div id="main">
@@ -285,29 +292,127 @@ function buildElements(cfg) {
     const isSave   = nd.stmts.length > 0 && nd.stmts[0].text.startsWith('save (');
     const isEntry  = nd.id === entryId;
     const firstLines = nd.stmts.length > 0 ? nd.stmts[0].text.split('\n').slice(0, 2).join('\n') : nd.id;
-    const label    = firstLines;
     const fullText = nd.stmts.map(s => s.text).join('\n');
-    return { data: { id: nd.id, label, fullText, isSave, isEntry } };
+    return { data: { id: nd.id, label: firstLines, fullText, isSave, isEntry } };
   });
 
-  const edges = cfg.edges.map((ed, i) => ({
-    data: {
-      id: 'e' + i,
-      source: ed.from,
-      target: ed.to,
-      label: ed.label,
-      color: EDGE_COLOR[ed.label] || '#888',
-    }
-  }));
+  const domEdges = [], nonDomEdges = [];
+  cfg.edges.forEach((ed, i) => {
+    const el = {
+      data: {
+        id: 'e' + i,
+        source: ed.from,
+        target: ed.to,
+        label: ed.label,
+        color: EDGE_COLOR[ed.label] || '#888',
+        dom: ed.dom === true,
+      }
+    };
+    (ed.dom === true ? domEdges : nonDomEdges).push(el);
+  });
 
-  return [...nodes, ...edges];
+  return { nodes, domEdges, nonDomEdges };
 }
 
 // ── render ────────────────────────────────────────────────────────────────────
 
 let cy = null;
+let currentCfg = null;
+
+const CYTO_STYLE = [
+  {
+    selector: 'node',
+    style: {
+      shape: 'rectangle',
+      'background-color': '#252526',
+      'border-width': 1,
+      'border-color': '#555',
+      label: 'data(label)',
+      'text-valign': 'center',
+      'text-halign': 'center',
+      'text-justification': 'left',
+      'font-family': 'monospace',
+      'font-size': 11,
+      color: '#d4d4d4',
+      'text-wrap': 'wrap',
+      'text-max-width': 500,
+      padding: 10,
+      width: 'label',
+      height: 'label',
+    }
+  },
+  {
+    selector: 'node[?isEntry]',
+    style: {
+      'border-color': '#569cd6',
+      'border-width': 2,
+      'background-color': '#0d2038',
+    }
+  },
+  {
+    selector: 'node[?isSave]',
+    style: {
+      'border-color': '#c586c0',
+      'border-width': 2,
+      'background-color': '#1e102a',
+    }
+  },
+  {
+    selector: 'node:selected',
+    style: { 'border-color': '#fff', 'border-width': 2 }
+  },
+  {
+    selector: 'edge',
+    style: {
+      width: 1.5,
+      'line-color': 'data(color)',
+      'target-arrow-color': 'data(color)',
+      'target-arrow-shape': 'triangle',
+      'curve-style': 'bezier',
+      label: 'data(label)',
+      'font-size': 10,
+      'font-family': 'monospace',
+      color: '#aaa',
+      'text-background-color': '#1e1e1e',
+      'text-background-opacity': 1,
+      'text-background-padding': '3px',
+    }
+  },
+  {
+    // Dominance-tree edges: solid, drawn on top
+    selector: 'edge[?dom]',
+    style: {
+      'line-style': 'solid',
+      width: 2,
+      'z-index': 2,
+    }
+  },
+  {
+    // Non-dominance edges: dashed, slightly receded
+    selector: 'edge[!dom]',
+    style: {
+      'line-style': 'dashed',
+      'line-dash-pattern': [7, 4],
+      width: 1.5,
+      opacity: 0.75,
+      'z-index': 1,
+      // Use a larger bezier curve to route around the dom-tree structure
+      'control-point-step-size': 60,
+    }
+  },
+];
+
+const DAGRE_OPTS = {
+  name: 'dagre',
+  rankDir: 'TB',
+  nodeSep: 50,
+  rankSep: 80,
+  padding: 40,
+  edgeSep: 10,
+};
 
 function render(cfg) {
+  currentCfg = cfg;
   document.getElementById('fn-info').textContent =
     cfg.nodes.length + ' nodes \u00b7 ' + cfg.edges.length + ' edges \u00b7 entry: ' + cfg.entry;
 
@@ -316,78 +421,22 @@ function render(cfg) {
   document.getElementById('detail-body').textContent   = 'No node selected.';
   document.getElementById('detail-body').className     = 'empty';
 
+  const { nodes, domEdges, nonDomEdges } = buildElements(cfg);
+
+  // Build graph with nodes + dom edges only, then run dagre so the
+  // dominator tree determines the initial layout.
   cy = cytoscape({
     container: document.getElementById('cy'),
-    elements: buildElements(cfg),
-    style: [
-      {
-        selector: 'node',
-        style: {
-          shape: 'rectangle',
-          'background-color': '#252526',
-          'border-width': 1,
-          'border-color': '#555',
-          label: 'data(label)',
-          'text-valign': 'center',
-          'text-halign': 'center',
-          'text-justification': 'left',
-          'font-family': 'monospace',
-          'font-size': 11,
-          color: '#d4d4d4',
-          'text-wrap': 'wrap',
-          'text-max-width': 500,
-          padding: 10,
-          width: 'label',
-          height: 'label',
-        }
-      },
-      {
-        selector: 'node[?isEntry]',
-        style: {
-          'border-color': '#569cd6',
-          'border-width': 2,
-          'background-color': '#0d2038',
-        }
-      },
-      {
-        selector: 'node[?isSave]',
-        style: {
-          'border-color': '#c586c0',
-          'border-width': 2,
-          'background-color': '#1e102a',
-        }
-      },
-      {
-        selector: 'node:selected',
-        style: { 'border-color': '#fff', 'border-width': 2 }
-      },
-      {
-        selector: 'edge',
-        style: {
-          width: 1.5,
-          'line-color': 'data(color)',
-          'target-arrow-color': 'data(color)',
-          'target-arrow-shape': 'triangle',
-          'curve-style': 'bezier',
-          label: 'data(label)',
-          'font-size': 10,
-          'font-family': 'monospace',
-          color: '#aaa',
-          'text-background-color': '#1e1e1e',
-          'text-background-opacity': 1,
-          'text-background-padding': '3px',
-        }
-      },
-    ],
-    layout: {
-      name: 'dagre',
-      rankDir: 'TB',
-      nodeSep: 50,
-      rankSep: 80,
-      padding: 40,
-      edgeSep: 10,
-    }
+    elements: [...nodes, ...domEdges],
+    style: CYTO_STYLE,
+    layout: { name: 'null' },   // suppress auto-layout; we run it below
   });
+
+  cy.layout(DAGRE_OPTS).run();  // dagre is synchronous
+
+  // Add non-dom edges after positions are fixed so they don't influence
+  // the tree layout.  Bezier curves will naturally route around the tree.
+  cy.add(nonDomEdges);
 
   const detailHeader = document.getElementById('detail-header');
   const detailBody   = document.getElementById('detail-body');
@@ -414,9 +463,14 @@ function render(cfg) {
 
 let cfgData = null;
 
+document.getElementById('reset-btn').addEventListener('click', () => {
+  if (currentCfg) render(currentCfg);
+});
+
 function loadCFGs(data, filename) {
   cfgData = data;
   hideMessage();
+  document.getElementById('reset-btn').style.display = '';
   document.title = 'Core CFG — ' + filename;
 
   const sel = document.getElementById('fn-select');
