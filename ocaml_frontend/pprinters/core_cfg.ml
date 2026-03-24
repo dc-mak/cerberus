@@ -35,7 +35,7 @@ let format_esave_header sym bty bindings =
 
 type node_id = Symbol.sym
 
-type edge_label = Seq | IfTrue | IfFalse | Run
+type edge_label = Seq | IfTrue | IfFalse | Run | Synth
 
 type stmt = { text : PPrint.document; loc : string }
 
@@ -291,11 +291,38 @@ let compute_dominance (cfg : cfg) : cfg =
       Hashtbl.replace dom_set (dom_node, node) ()
   ) idom;
 
-  (* Annotate CFG edges. *)
+  (* Annotate existing CFG edges. *)
+  let cfg_edge_set : (string * string, unit) Hashtbl.t =
+    Hashtbl.create (List.length cfg.edges)
+  in
   let new_edges = List.map (fun ed ->
-    { ed with dom = Hashtbl.mem dom_set (sid ed.from_id, sid ed.to_id) }
+    let key = (sid ed.from_id, sid ed.to_id) in
+    Hashtbl.replace cfg_edge_set key ();
+    { ed with dom = Hashtbl.mem dom_set key }
   ) cfg.edges in
-  { cfg with edges = new_edges }
+
+  (* Reverse map: string id -> node_id sym, for building synthetic edges. *)
+  let sym_of_id : (string, node_id) Hashtbl.t = Hashtbl.create 16 in
+  List.iter (fun (nd : node) ->
+    Hashtbl.replace sym_of_id (sid nd.id) nd.id
+  ) cfg.nodes;
+
+  (* For every idom pair (dom_node -> node) with no direct CFG edge,
+     add a synthetic dominator-tree edge. *)
+  let synth_edges =
+    Hashtbl.fold (fun node dom_node acc ->
+      if String.compare node entry_k <> 0
+      && not (Hashtbl.mem cfg_edge_set (dom_node, node)) then
+        match Hashtbl.find_opt sym_of_id dom_node,
+              Hashtbl.find_opt sym_of_id node with
+        | Some from_sym, Some to_sym ->
+            { from_id = from_sym; to_id = to_sym; label = Synth; dom = true } :: acc
+        | _ -> acc
+      else acc
+    ) idom []
+  in
+
+  { cfg with edges = new_edges @ synth_edges }
 
 (* ===== Per-function analysis ===== *)
 
@@ -348,6 +375,7 @@ let edge_label_str = function
   | IfTrue  -> "if-true"
   | IfFalse -> "if-false"
   | Run     -> "run"
+  | Synth   -> "synth"
 
 let pp_json fmt cfgs =
   let buf = Buffer.create 4096 in

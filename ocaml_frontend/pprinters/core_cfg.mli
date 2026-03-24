@@ -19,6 +19,7 @@ type edge_label =
   | IfTrue   (** True branch of an Eif *)
   | IfFalse  (** False branch of an Eif *)
   | Run      (** Non-returning jump: Erun *)
+  | Synth    (** Synthetic dominator-tree edge with no corresponding CFG edge *)
 
 (** A single statement within a basic block, retaining its original source
     location and verbatim pretty-printed text. *)
