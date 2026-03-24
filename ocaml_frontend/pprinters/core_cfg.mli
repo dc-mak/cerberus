@@ -38,6 +38,9 @@ type edge = {
   from_id : node_id;
   to_id   : node_id;
   label   : edge_label;
+  (** [dom] is [true] when this edge is a dominator-tree edge, i.e. when
+      [from_id] is the immediate dominator of [to_id]. *)
+  dom     : bool;
 }
 
 type cfg = {

@@ -48,6 +48,7 @@ type edge = {
   from_id : node_id;
   to_id   : node_id;
   label   : edge_label;
+  dom     : bool;
 }
 
 type cfg = {
@@ -94,7 +95,7 @@ let flush_acc ctx acc =
   assert (acc.stmts <> []);
   emit_node ctx { id = acc.id; stmts = acc.stmts };
   List.iter (fun src ->
-    emit_edge ctx { from_id = src; to_id = acc.id; label = Seq }
+    emit_edge ctx { from_id = src; to_id = acc.id; label = Seq; dom = false }
   ) acc.incoming;
   acc.id
 
@@ -186,14 +187,14 @@ let rec build_expr ctx acc (Expr (annots, expr_) as expr) =
       let if_id  = flush_acc ctx if_acc in
       let r_t = build_expr ctx (fresh_acc ()) et in
       let r_f = build_expr ctx (fresh_acc ()) ef in
-      emit_edge ctx { from_id = if_id; to_id = r_t.entry; label = IfTrue  };
-      emit_edge ctx { from_id = if_id; to_id = r_f.entry; label = IfFalse };
+      emit_edge ctx { from_id = if_id; to_id = r_t.entry; label = IfTrue;  dom = false };
+      emit_edge ctx { from_id = if_id; to_id = r_f.entry; label = IfFalse; dom = false };
       { entry = if_id; exits = r_t.exits @ r_f.exits }
 
   | Erun (_, sym, _args) ->
       let run_acc = add_stmt acc { text = mk_doc (fun () -> Pp_core.Basic.pp_expr expr); loc } in
       let run_id  = flush_acc ctx run_acc in
-      emit_edge ctx { from_id = run_id; to_id = sym; label = Run };
+      emit_edge ctx { from_id = run_id; to_id = sym; label = Run; dom = false };
       { entry = run_id; exits = [] }
 
   | _ ->
@@ -201,6 +202,100 @@ let rec build_expr ctx acc (Expr (annots, expr_) as expr) =
                  Eunseq, End, Epar, Ewait, Eexcluded *)
       let s = { text = mk_doc (fun () -> Pp_core.Basic.pp_expr expr); loc } in
       { entry = acc.id; exits = [add_stmt acc s] }
+
+(* ===== Dominance analysis ===== *)
+
+(* Marks each CFG edge (u, v) with dom = true when u is the immediate
+   dominator of v.  Uses Cooper et al.'s simple iterative algorithm
+   ("A Simple, Fast Dominance Algorithm", SPE 2001). *)
+let compute_dominance (cfg : cfg) : cfg =
+  let sid = Pp_symbol.to_string in
+  let entry_k = sid cfg.entry in
+
+  (* Adjacency tables keyed by string node-id. *)
+  let succs : (string, string list) Hashtbl.t = Hashtbl.create 16 in
+  let preds : (string, string list) Hashtbl.t = Hashtbl.create 16 in
+  List.iter (fun (nd : node) ->
+    let k = sid nd.id in
+    if not (Hashtbl.mem succs k) then Hashtbl.replace succs k [];
+    if not (Hashtbl.mem preds k) then Hashtbl.replace preds k []
+  ) cfg.nodes;
+  List.iter (fun ed ->
+    let fk = sid ed.from_id and tk = sid ed.to_id in
+    Hashtbl.replace succs fk (tk :: (try Hashtbl.find succs fk with Not_found -> []));
+    Hashtbl.replace preds tk (fk :: (try Hashtbl.find preds tk with Not_found -> []))
+  ) cfg.edges;
+
+  (* DFS from entry; prepend each node after its subtree to get RPO. *)
+  let visited  : (string, unit) Hashtbl.t = Hashtbl.create 16 in
+  let rpo_list : string list ref = ref [] in
+  let rec dfs node =
+    if not (Hashtbl.mem visited node) then begin
+      Hashtbl.replace visited node ();
+      List.iter dfs (try Hashtbl.find succs node with Not_found -> []);
+      rpo_list := node :: !rpo_list
+    end
+  in
+  dfs entry_k;
+  let rpo = Array.of_list !rpo_list in   (* rpo.(0) = entry *)
+  let rpo_num : (string, int) Hashtbl.t = Hashtbl.create (Array.length rpo) in
+  Array.iteri (fun i n -> Hashtbl.replace rpo_num n i) rpo;
+
+  (* Iterative idom computation. *)
+  let idom : (string, string) Hashtbl.t = Hashtbl.create (Array.length rpo) in
+  Hashtbl.replace idom entry_k entry_k;
+
+  let intersect b1 b2 =
+    let f1 = ref b1 and f2 = ref b2 in
+    while String.compare !f1 !f2 <> 0 do
+      while Hashtbl.find rpo_num !f1 > Hashtbl.find rpo_num !f2 do
+        f1 := Hashtbl.find idom !f1
+      done;
+      while Hashtbl.find rpo_num !f2 > Hashtbl.find rpo_num !f1 do
+        f2 := Hashtbl.find idom !f2
+      done
+    done;
+    !f1
+  in
+
+  let changed = ref true in
+  while !changed do
+    changed := false;
+    for i = 1 to Array.length rpo - 1 do
+      let b = rpo.(i) in
+      let processed =
+        List.filter (fun p -> Hashtbl.mem idom p)
+          (try Hashtbl.find preds b with Not_found -> [])
+      in
+      match processed with
+      | [] -> ()
+      | first :: rest ->
+          let new_idom = List.fold_left intersect first rest in
+          let update = match Hashtbl.find_opt idom b with
+            | Some old -> String.compare old new_idom <> 0
+            | None     -> true
+          in
+          if update then begin
+            Hashtbl.replace idom b new_idom;
+            changed := true
+          end
+    done
+  done;
+
+  (* Collect the set of dominator-tree edge pairs (idom(v), v). *)
+  let dom_set : (string * string, unit) Hashtbl.t =
+    Hashtbl.create (Hashtbl.length idom)
+  in
+  Hashtbl.iter (fun node dom_node ->
+    if String.compare node entry_k <> 0 then
+      Hashtbl.replace dom_set (dom_node, node) ()
+  ) idom;
+
+  (* Annotate CFG edges. *)
+  let new_edges = List.map (fun ed ->
+    { ed with dom = Hashtbl.mem dom_set (sid ed.from_id, sid ed.to_id) }
+  ) cfg.edges in
+  { cfg with edges = new_edges }
 
 (* ===== Per-function analysis ===== *)
 
@@ -210,10 +305,11 @@ let analyse_cfg_for_fun fun_name body =
   let r = build_expr ctx init_acc body in
   (* Flush any open exits (fall-through at end of function body). *)
   List.iter (fun a -> ignore (flush_acc ctx a)) r.exits;
-  { fun_name;
-    entry = r.entry;
-    nodes = List.rev !(ctx.nodes);
-    edges = !(ctx.edges) }
+  let cfg = { fun_name;
+              entry = r.entry;
+              nodes = List.rev !(ctx.nodes);
+              edges = !(ctx.edges) } in
+  compute_dominance cfg
 
 (* ===== File-level entry point ===== *)
 
@@ -286,7 +382,8 @@ let pp_json fmt cfgs =
       nl_indent 6; s "{";
       nl_indent 8; s ("\"from\": " ^ json_str (Pp_symbol.to_string ed.from_id) ^ ",");
       nl_indent 8; s ("\"to\": " ^ json_str (Pp_symbol.to_string ed.to_id) ^ ",");
-      nl_indent 8; s ("\"label\": " ^ json_str (edge_label_str ed.label));
+      nl_indent 8; s ("\"label\": " ^ json_str (edge_label_str ed.label) ^ ",");
+      nl_indent 8; s ("\"dom\": " ^ (if ed.dom then "true" else "false"));
       nl_indent 6; s "}"
     ) cfg.edges;
     nl_indent 4; s "]";
