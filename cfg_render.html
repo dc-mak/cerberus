@@ -293,6 +293,9 @@ fileInput.addEventListener('change', e => {
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
+// Determines left-to-right child ordering in the dagre layout.
+const EDGE_ORDER = { 'if-true': 0, 'if-false': 1, 'seq': 2, 'synth': 3, 'run': 4 };
+
 const EDGE_COLOR = {
   'seq':      '#569cd6',
   'if-true':  '#4ec94e',
@@ -328,6 +331,10 @@ function buildElements(cfg) {
     };
     (ed.dom === true ? domEdges : nonDomEdges).push(el);
   });
+
+  const sortKey = e => EDGE_ORDER[e.data.label] ?? 99;
+  domEdges.sort((a, b) => sortKey(a) - sortKey(b));
+  nonDomEdges.sort((a, b) => sortKey(a) - sortKey(b));
 
   return { nodes, domEdges, nonDomEdges };
 }
