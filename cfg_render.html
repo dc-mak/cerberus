@@ -117,6 +117,21 @@
     }
     #message-box.hint  { color: #888; }
     #message-box.error { background: #2a1010; border: 1px solid #a33; color: #f88; }
+
+    #dom-warning {
+      position: absolute;
+      bottom: 12px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: #2a2000;
+      border: 1px solid #665500;
+      color: #ccaa44;
+      font-size: 11px;
+      padding: 5px 14px;
+      border-radius: 3px;
+      pointer-events: none;
+      display: none;
+    }
   </style>
 </head>
 <body>
@@ -149,6 +164,7 @@
   </div>
 </div>
 <div id="message"><div id="message-box" class="hint">Open a .cfg.json file to visualise its control-flow graph.</div></div>
+<div id="dom-warning">No dominance edges found — regenerate the .cfg.json with a newer build to enable dom-tree layout.</div>
 
 <script src="https://unpkg.com/cytoscape@3.26.0/dist/cytoscape.min.js"></script>
 <script src="https://unpkg.com/dagre@0.8.5/dist/dagre.min.js"></script>
@@ -431,6 +447,9 @@ function render(cfg) {
     style: CYTO_STYLE,
     layout: { name: 'null' },   // suppress auto-layout; we run it below
   });
+
+  document.getElementById('dom-warning').style.display =
+    domEdges.length === 0 ? '' : 'none';
 
   cy.layout(DAGRE_OPTS).run();  // dagre is synchronous
 
