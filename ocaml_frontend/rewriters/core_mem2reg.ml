@@ -7,17 +7,6 @@ open Core
 (* Internal classification of how a pointer sym is used               *)
 (* ------------------------------------------------------------------ *)
 
-type use =
-  | Use_load    (* Load0(_, PEsym ptr, _)  — address argument *)
-  | Use_store   (* Store0(_, _, PEsym ptr, _, _) — address argument *)
-  | Use_kill    (* Kill(_, PEsym ptr) *)
-  | Use_seqrmw  (* SeqRMW(_, _, PEsym ptr, tmp, upd) — ptr is the address argument *)
-  | Use_other   (* any other occurrence *)
-
-let addr_not_taken = function
-  | Use_load | Use_store | Use_kill | Use_seqrmw -> true
-  | Use_other -> false
-
 (* ------------------------------------------------------------------ *)
 (* Occurrence helpers                                                 *)
 (* ------------------------------------------------------------------ *)
@@ -27,116 +16,81 @@ let is_pesym sym (Pexpr (_, _, pe_)) =
   | PEsym s -> Symbol.symbolEquality s sym
   | _ -> false
 
-let rec sym_occurs_in_pexpr sym (Pexpr (_, _, pe_)) =
+let sym_empty_set = Pset.empty Symbol.compare_sym
+
+let sym_empty_map = Pmap.empty Symbol.compare_sym
+
+(* [pexpr_vars pe] is the set of all symbols mentioned in [pe]
+   we don't care about bound variables here *)
+let rec pexpr_vars (Pexpr (_, _, pe_)) =
   match pe_ with
-  | PEsym s -> Symbol.symbolEquality s sym
-  | PEval _ | PEimpl _ | PEundef _ | PEerror _ -> false
+  | PEsym s -> Pset.singleton Symbol.compare_sym s
+  | PEval _ | PEimpl _ | PEundef _ | PEerror _ -> sym_empty_set
   | PEctor (_, pes) | PEcall (_, pes) | PEmemop (_, pes) ->
-      List.exists (sym_occurs_in_pexpr sym) pes
+      pexpr_list_vars pes
   | PEcase (pe, arms) ->
-      sym_occurs_in_pexpr sym pe
-      || List.exists (fun (_, pe2) -> sym_occurs_in_pexpr sym pe2) arms
-  | PEarray_shift (pe1, _, pe2) | PEop (_, pe1, pe2) ->
-      sym_occurs_in_pexpr sym pe1 || sym_occurs_in_pexpr sym pe2
-  | PElet (_, pe1, pe2) ->
-      sym_occurs_in_pexpr sym pe1 || sym_occurs_in_pexpr sym pe2
-  | PEwrapI (_, _, pe1, pe2) | PEcatch_exceptional_condition (_, _, pe1, pe2) ->
-      sym_occurs_in_pexpr sym pe1 || sym_occurs_in_pexpr sym pe2
+      pexpr_list_vars (pe :: (List.map snd arms))
+  | PEarray_shift (pe1, _, pe2) | PEop (_, pe1, pe2)
+  | PElet (_, pe1, pe2) | PEwrapI (_, _, pe1, pe2)
+  | PEcatch_exceptional_condition (_, _, pe1, pe2)
+  | PEare_compatible (pe1, pe2) ->
+      pexpr_list_vars [pe1; pe2]
   | PEmember_shift (pe, _, _)
   | PEconv_int (_, pe)
   | PEnot pe
   | PEis_scalar pe | PEis_integer pe | PEis_signed pe | PEis_unsigned pe
   | PEmemberof (_, _, pe) | PEunion (_, _, pe) | PEcfunction pe
   | PEbmc_assume pe ->
-      sym_occurs_in_pexpr sym pe
+      pexpr_vars pe
   | PEif (pe1, pe2, pe3) ->
-      sym_occurs_in_pexpr sym pe1
-      || sym_occurs_in_pexpr sym pe2
-      || sym_occurs_in_pexpr sym pe3
+      pexpr_list_vars [pe1; pe2; pe3]
   | PEconstrained ivs ->
-      List.exists (fun (_, pe) -> sym_occurs_in_pexpr sym pe) ivs
+      pexpr_list_vars (List.map snd ivs)
   | PEstruct (_, fields) ->
-      List.exists (fun (_, pe) -> sym_occurs_in_pexpr sym pe) fields
-  | PEare_compatible (pe1, pe2) ->
-      sym_occurs_in_pexpr sym pe1 || sym_occurs_in_pexpr sym pe2
+      pexpr_list_vars (List.map snd fields)
 
-let sym_occurs_in_action sym act_ =
+and pexpr_list_vars pes =
+  List.fold_left (fun set pe ->
+      Pset.union set (pexpr_vars pe)) sym_empty_set pes
+
+(* [action_escaping_vars creates act_] is the set of all vars which are
+   mentioned in non-direct-address positions. For Store0/Load0/Kill/SeqRMW the
+   bare-PEsym address argument is excluded; everything else is included.  *)
+let action_escaping_vars act_ =
+  (* addr_indirect addr_pe: if not a bare PEsym, all syms in addr_pe are bad *)
+  let addr_indirect addr_pe =
+    match addr_pe with
+    | Pexpr (_, _, PEsym _) ->
+      sym_empty_set
+    | _ ->
+      pexpr_vars addr_pe
+  in
   match act_ with
-  | Create (pe1, pe2, _) ->
-      sym_occurs_in_pexpr sym pe1 || sym_occurs_in_pexpr sym pe2
-  | CreateReadOnly (pe1, pe2, pe3, _) ->
-      sym_occurs_in_pexpr sym pe1
-      || sym_occurs_in_pexpr sym pe2
-      || sym_occurs_in_pexpr sym pe3
-  | Alloc0 (pe1, pe2, _) ->
-      sym_occurs_in_pexpr sym pe1 || sym_occurs_in_pexpr sym pe2
-  | Kill (_, pe) -> sym_occurs_in_pexpr sym pe
-  | Load0 (_, pe, _) -> sym_occurs_in_pexpr sym pe
-  | Store0 (_, pe1, pe2, pe3, _) ->
-      sym_occurs_in_pexpr sym pe1
-      || sym_occurs_in_pexpr sym pe2
-      || sym_occurs_in_pexpr sym pe3
-  | Fence0 _ -> false
-  | SeqRMW (_, pe1, pe2, _, pe3) ->
-      sym_occurs_in_pexpr sym pe1
-      || sym_occurs_in_pexpr sym pe2
-      || sym_occurs_in_pexpr sym pe3
+  | Store0 (_, ctype_pe, addr_pe, val_pe, _) ->
+      Pset.union (addr_indirect addr_pe) (pexpr_list_vars [ctype_pe; val_pe])
+  | Load0 (_, addr_pe, _) | Kill (_, addr_pe) ->
+      addr_indirect addr_pe
+  | SeqRMW (_, ty_pe, addr_pe, _, upd_pe) ->
+      Pset.union (addr_indirect addr_pe) (pexpr_list_vars [ty_pe; upd_pe])
+  | Create (pe1, pe2, _) | Alloc0 (pe1, pe2, _)
+  | LinuxLoad (pe1, pe2, _) ->
+      pexpr_list_vars [pe1; pe2]
+  | CreateReadOnly (pe1, pe2, pe3, _) | LinuxStore (pe1, pe2, pe3, _)
+  | LinuxRMW (pe1, pe2, pe3, _) ->
+      pexpr_list_vars [pe1; pe2; pe3]
+  | Fence0 _ | LinuxFence _ -> sym_empty_set
   | RMW0 (pe1, pe2, pe3, pe4, _, _)
   | CompareExchangeStrong (pe1, pe2, pe3, pe4, _, _)
   | CompareExchangeWeak (pe1, pe2, pe3, pe4, _, _) ->
-      List.exists (sym_occurs_in_pexpr sym) [pe1; pe2; pe3; pe4]
-  | LinuxFence _ -> false
-  | LinuxLoad (pe1, pe2, _) ->
-      sym_occurs_in_pexpr sym pe1 || sym_occurs_in_pexpr sym pe2
-  | LinuxStore (pe1, pe2, pe3, _) | LinuxRMW (pe1, pe2, pe3, _) ->
-      List.exists (sym_occurs_in_pexpr sym) [pe1; pe2; pe3]
-
-(* ------------------------------------------------------------------ *)
-(* Classify a single action's uses of sym                             *)
-(* Only plain uses of the symbol are allowed - e.g. member shifts are *)
-(* counted as other uses and not promoted.                            *)
-(* ------------------------------------------------------------------ *)
-
-let classify_action sym act_ : use list =
-  match act_ with
-  | Store0 (_, _ctype_pe, addr_pe, val_pe, _) ->
-      let addr_use =
-        if is_pesym sym addr_pe then [Use_store]
-        else if sym_occurs_in_pexpr sym addr_pe then [Use_other]
-        else []
-      in
-      let val_use =
-        if sym_occurs_in_pexpr sym val_pe then [Use_other] else []
-      in
-      addr_use @ val_use
-  | Load0 (_ctype_pe, addr_pe, _) ->
-      if is_pesym sym addr_pe then [Use_load]
-      else if sym_occurs_in_pexpr sym addr_pe then [Use_other]
-      else []
-  | Kill (_, addr_pe) ->
-      if is_pesym sym addr_pe then [Use_kill]
-      else if sym_occurs_in_pexpr sym addr_pe then [Use_other]
-      else []
-  | SeqRMW (_, _ty_pe, addr_pe, _tmp_sym, upd_pe) ->
-      let addr_use =
-        if is_pesym sym addr_pe then [Use_seqrmw]
-        else if sym_occurs_in_pexpr sym addr_pe then [Use_other]
-        else []
-      in
-      let upd_use =
-        if sym_occurs_in_pexpr sym upd_pe then [Use_other] else []
-      in
-      addr_use @ upd_use
-  | _ ->
-      if sym_occurs_in_action sym act_ then [Use_other] else []
+      pexpr_list_vars [pe1; pe2; pe3; pe4]
 
 (* ------------------------------------------------------------------ *)
 (* Esave memo tables                                                  *)
 (*                                                                    *)
-(* Both collect_uses and sequentialisable need to analyse Esave       *)
-(* bodies: once via the default args and once per Erun call site.     *)
-(* Results are memoised per (label_sym, param_sym) to avoid redundant *)
-(* traversals and to terminate on back-edge Eruns.                    *)
+(* sequentialisable analyses Esave bodies once via the default args   *)
+(* and once per Erun call site.  Results are memoised per             *)
+(* (label_sym, param_sym) to avoid redundant traversals and to        *)
+(* terminate on back-edge Eruns.                                      *)
 (* ------------------------------------------------------------------ *)
 
 type 'a esave_memo_entry = {
@@ -145,7 +99,6 @@ type 'a esave_memo_entry = {
   results : (Symbol.sym, 'a) Pmap.map ref;        (* param_sym -> cached result, filled lazily *)
 }
 
-(* 'a = use list                              for collect_uses          *)
 (* 'a = bool * (Event_set.t * env) option  for sequentialisable   *)
 type 'a memo_save_info = (Symbol.sym, 'a esave_memo_entry) Pmap.map
 
@@ -162,13 +115,23 @@ let find_single_direct_alias sym pairs =
   | [param_sym] -> Some param_sym
   | _ :: _ :: _ -> failwith "Core_mem2reg: multiple direct aliases for the same sym"
 
+(*
+let process_erun_args creates params args =
+  List.iter2 (fun _ arg ->
+    match arg with
+    | Pexpr (_, _, PEsym s) when Pset.mem s !creates -> ()
+    | _ -> pexpr_vars creates arg)
+    params args
+*)
+
 (* collect_info: single pass over the function body that simultaneously
-   (a) collects all Esave definitions into a memo table, and
-   (b) finds Create-bound syms that are candidates for promotion.    *)
-let collect_info ~also_fun_args body =
-  let esave_memo = ref (Pmap.empty Symbol.compare_sym) in
-  let creates    = ref (Pset.empty Symbol.compare_sym) in
-  let rec walk (Expr (_, e_)) =
+   (a) collects all Esave definitions into a memo table,
+   (b) collects Create-bound syms that are candidates for promotion, and
+   (c) removes from the candidate set any sym that appears in a non-direct-
+       address position (i.e., not as the bare PEsym address argument of a
+       Store0/Load0/Kill/SeqRMW).  Whatever remains in `creates` after the
+       walk has been seen only in those safe positions.                    *)
+let rec collect_info ~also_fun_args (esave_memo, creates, pending_eruns) (Expr (_, e_)) =
     match e_ with
     | Esave ((label_sym, _), params, esave_body) ->
         let entry = {
@@ -176,110 +139,80 @@ let collect_info ~also_fun_args body =
           body    = esave_body;
           results = ref (Pmap.empty Symbol.compare_sym);
         } in
-        esave_memo := Pmap.add label_sym entry !esave_memo;
-        walk esave_body
+        let esave_memo = Pmap.add label_sym entry esave_memo in
+        collect_info ~also_fun_args (esave_memo, creates, pending_eruns) esave_body
     | Esseq (
         Pattern (_, CaseBase (Some ptr_sym, _)),
         Expr (_, Eaction (Paction (_, Action (_, _, Create (_, _,
             (Symbol.PrefSource _ | Symbol.PrefCompoundLiteral _)))))),
         body
       ) ->
-        creates := Pset.add ptr_sym !creates;
-        walk body
+        let creates = Pset.add ptr_sym creates in
+        collect_info ~also_fun_args (esave_memo, creates, pending_eruns) body
     | Esseq (
         Pattern (_, CaseBase (Some ptr_sym, _)),
         Expr (_, Eaction (Paction (_, Action (_, _, Create (_, _, Symbol.PrefFunArg _))))),
         body
       ) when also_fun_args ->
-        creates := Pset.add ptr_sym !creates;
-        walk body
-    | Ewseq (_, e1, e2) | Esseq (_, e1, e2) -> walk e1; walk e2
-    | Eif (_, e1, e2)                        -> walk e1; walk e2
-    | Ecase (_, arms)   -> List.iter (fun (_, e) -> walk e) arms
-    | Elet (_, _, e) | Ebound e | Eannot (_, e) -> walk e
-    | Eunseq es | End es | Epar es           -> List.iter walk es
-    | Epure _ | Eaction _ | Ememop _ | Eccall _ | Eproc _
-    | Erun _ | Ewait _ | Eexcluded _        -> ()
+        let creates = Pset.add ptr_sym creates in
+        collect_info ~also_fun_args (esave_memo, creates, pending_eruns) body
+    | Eaction (Paction (_, Action (_, _, act_))) ->
+        (esave_memo, Pset.diff creates (action_escaping_vars act_), pending_eruns)
+    | Epure pe ->
+        (esave_memo, Pset.diff creates (pexpr_vars pe), pending_eruns)
+    | Ememop (_, pes) ->
+        (esave_memo, Pset.diff creates (pexpr_list_vars pes), pending_eruns)
+    | Elet (_, pe, e) ->
+        let creates = Pset.diff creates (pexpr_vars pe) in
+        collect_info ~also_fun_args (esave_memo, creates, pending_eruns) e
+    | Ecase (pe, arms) ->
+        let creates = Pset.diff creates (pexpr_vars pe) in
+        let _ = List.map (fun (_, e) -> collect_info ~also_fun_args (esave_memo, creates, pending_eruns)) arms in
+        _
+    | Eif (pe, e1, e2) ->
+        _
+        (* pexpr_vars creates pe; walk e1; walk e2 *)
+    | Eccall (_, fn_pe, arg_pe, pes) ->
+        _
+        (* List.iter (pexpr_vars creates) (fn_pe :: arg_pe :: pes) *)
+    | Eproc (_, _, pes) ->
+        _
+        (* List.iter (pexpr_vars creates) pes *)
+    | Erun (_, label_sym, args) ->
+        _
+        (* (match Pmap.lookup label_sym !esave_memo with *)
+        (* | Some entry -> process_erun_args creates entry.params args *)
+        (* | None -> pending_eruns := (label_sym, args) :: !pending_eruns) *)
+    | Ewseq (_, e1, e2) | Esseq (_, e1, e2) ->
+      _
+      (* walk e1; walk e2 *)
+    | Ebound e | Eannot (_, e) ->
+      collect_info ~also_fun_args (esave_memo, creates, pending_eruns) e
+    | Eunseq es | End es | Epar es           ->
+      _
+      (* List.iter walk es *)
+    | Ewait _ | Eexcluded _                  ->
+      (esave_memo, creates, pending_eruns)
+      (* () *)
+
+let collect_info ~also_fun_args body =
+  let esave_memo    = Pmap.empty Symbol.compare_sym in
+  let creates       = Pset.empty Symbol.compare_sym in
+  let pending_eruns = [] in
+  let (esave_memo, creates, pending_eruns) =
+    collect_info ~also_fun_args (esave_memo, creates, pending_eruns) body
   in
-  walk body;
-  (!esave_memo, !creates)
-
-(* ------------------------------------------------------------------- *)
-(* collect_uses: gather all uses of sym in an expression               *)
-(*                                                                     *)
-(* Key invariant (guaranteed by elaboration): for any CREATE-bound     *)
-(* local pointer sym `s`, if `s` appears in an Esave body, then `s`    *)
-(* is passed as a direct PEsym default arg to that Esave.  This means  *)
-(* the case when `find_single_direct_alias` returns None is sound: if  *)
-(* `s` is not in any param, it cannot appear in the body as an address *)
-(* of a Load/Store/Kill. 					       *)
-(*                                                                     *)
-(* Non-pointer syms (e.g., globals, or function parameters in the      *)
-(* Normal_callconv) may appear freely in Esave bodies and are not      *)
-(* mem2reg candidates; they do not affect this analysis.               *)
-(*                                                                     *)
-(* Symbol rebindings/aliases in let/wseq/sseq are eliminated by the    *)
-(* copy_prop pass (required/assumed) and so we can be naive here.      *)
-(* ------------------------------------------------------------------- *)
-
-let rec collect_uses use_memo sym (Expr (_, e_)) : use list =
-  match e_ with
-  | Eaction (Paction (_, Action (_, _, act_))) ->
-      classify_action sym act_
-  | Esave ((label_sym, _), params, _body) ->
-      (* All default args are bare PEsym by the closedness check.
-         Closedness also guarantees sym is not free in body unless it is a param. *)
-      let entry = Pmap.find label_sym use_memo in
-      (match find_single_direct_alias sym
-               (List.map (fun (p, (_, pe)) -> (p, pe)) params) with
-      | None           -> []
-      | Some param_sym ->
-          (match Pmap.lookup param_sym !(entry.results) with
-          | Some cached -> cached
-          | None ->
-              entry.results := Pmap.add param_sym [] !(entry.results);
-              let result = collect_uses use_memo param_sym entry.body in
-              entry.results := Pmap.add param_sym result !(entry.results);
-              result))
-  | Erun (_, label_sym, args) ->
-      (* Closedness guarantees args matching sym are direct PEsym aliases. *)
-      let entry = Pmap.find label_sym use_memo in
-      (match find_single_direct_alias sym
-               (List.combine (List.map fst entry.params) args) with
-      | None           -> []
-      | Some param_sym ->
-          (match Pmap.lookup param_sym !(entry.results) with
-          | Some cached -> cached
-          | None ->
-              entry.results := Pmap.add param_sym [] !(entry.results);
-              let result = collect_uses use_memo param_sym entry.body in
-              entry.results := Pmap.add param_sym result !(entry.results);
-              result))
-  | Epure pe ->
-      if sym_occurs_in_pexpr sym pe then [Use_other] else []
-  | Ememop (_, pes) ->
-      if List.exists (sym_occurs_in_pexpr sym) pes then [Use_other] else []
-  | Elet (_, pe, e) ->
-      (if sym_occurs_in_pexpr sym pe then [Use_other] else [])
-      @ collect_uses use_memo sym e
-  | Ecase (pe, arms) ->
-      (if sym_occurs_in_pexpr sym pe then [Use_other] else [])
-      @ List.concat_map (fun (_, e) -> collect_uses use_memo sym e) arms
-  | Eif (pe, e1, e2) ->
-      (if sym_occurs_in_pexpr sym pe then [Use_other] else [])
-      @ collect_uses use_memo sym e1
-      @ collect_uses use_memo sym e2
-  | Eccall (_, fn_pe, arg_pe, pes) ->
-      if List.exists (sym_occurs_in_pexpr sym) (fn_pe :: arg_pe :: pes)
-      then [Use_other] else []
-  | Eproc (_, _, pes) ->
-      if List.exists (sym_occurs_in_pexpr sym) pes then [Use_other] else []
-  | Eunseq es | End es | Epar es ->
-      List.concat_map (collect_uses use_memo sym) es
-  | Ewseq (_, e1, e2) | Esseq (_, e1, e2) ->
-      collect_uses use_memo sym e1 @ collect_uses use_memo sym e2
-  | Ebound e | Eannot (_, e) -> collect_uses use_memo sym e
-  | Ewait _ | Eexcluded _ -> []
+  (esave_memo, creates)
+(*
+  (* Process any Eruns whose labels were not yet defined at the time of the
+     walk (forward references).  All Esaves are now in esave_memo.         *)
+  List.iter (fun (label_sym, args) ->
+    match Pmap.lookup label_sym !esave_memo with
+    | None -> ()
+    | Some entry -> process_erun_args creates entry.params args)
+  !pending_eruns;
+  (esave_memo, creates)
+*)
 
 (* ------------------------------------------------------------------ *)
 (* sequentialisable: unified promotability analysis                    *)
@@ -388,8 +321,9 @@ let rec sequentialisable (seq_memo : seq_memo) sym env (Expr (_, e_))
            | Uninit -> raise Load_from_uninit
            | Killed -> raise Not_sequentialisable)
       | _ ->
-        (* classify_action marks these cases as Use_other, which are filtered
-         * out before this function is called. *)
+        (* sym was verified to appear only as a direct address argument
+         * (collect_info left it in creates), so non-address actions are
+         * irrelevant and can be skipped. *)
         Some (Es.empty, env)
       end
   | Esseq (_, e1, e2) ->
@@ -498,16 +432,15 @@ and save_param_needs_init seq_memo sym label_sym param_sym
 (* ------------------------------------------------------------------ *)
 
 let find_promotable ~also_fun_args f_sym body : Symbol.sym list =
-  let (use_memo : use list memo_save_info), creates = collect_info ~also_fun_args body in
+  let esave_memo, creates = collect_info ~also_fun_args body in
   let seq_memo  : seq_memo =
     Pmap.map (fun { params; body; _ } ->
-      { params; body; results = ref (Pmap.empty Symbol.compare_sym) }) use_memo in
+      { params; body; results = ref (Pmap.empty Symbol.compare_sym) }) esave_memo in
   let is_promotable s =
-    List.for_all addr_not_taken (collect_uses use_memo s body)
-    && (match sequentialisable seq_memo s Uninit body with
-        | None | Some _ -> true
-        | exception Not_sequentialisable -> false
-        | exception Load_from_uninit    -> false)
+    match sequentialisable seq_memo s Uninit body with
+    | None | Some _ -> true
+    | exception Not_sequentialisable -> false
+    | exception Load_from_uninit    -> false
   in
   let promotable = List.filter is_promotable (Pset.elements creates) in
   Cerb_debug.print_debug 3 [] (fun () ->
