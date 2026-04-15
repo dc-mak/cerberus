@@ -1,0 +1,6 @@
+{
+    "name": "transform",
+    "args": ["--sw", "copy_prop,mem2reg", "--typecheck-core", "--exec", "--batch"],
+    "filter": "^(.*\\.c)$",
+    "timeout": 5
+}
