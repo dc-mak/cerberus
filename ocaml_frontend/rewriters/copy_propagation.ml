@@ -55,7 +55,7 @@ let rec can_prop_and_rm binders (Pexpr (_, _, pe_)) =
   | PEif _ | PElet _ | PEcase _ | PEconstrained _ ->
       false  (* not worth extra complexity *)
    | PEcall _ | PEcfunction _ ->
-     false (* unsafe to replace with unit *)
+     false (* always returns tuple *)
 
 let rec binders_of_pat (Pattern (_, pat_)) =
   match pat_ with
