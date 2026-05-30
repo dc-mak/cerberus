@@ -49,8 +49,12 @@ let hex_escape = "\\x" hexadecimal_digit+
 let escape_sequence =
     simple_escape | octal_escape | hex_escape | universal_character_name
 
-let s_char = [^ '"' '\\' '\n'] | escape_sequence
-let c_char = [^ '\'' '\\' '\n'] | escape_sequence
+(* Lenient at phase 3: a backslash escapes any following character (even an
+   invalid escape like \e), so the whole literal is one token.  c_lexer validates
+   and decodes it when the feed re-lexes the spelling — matching where the
+   external path reports an invalid-string-character error. *)
+let s_char = [^ '"' '\\' '\n'] | '\\' [^ '\n']
+let c_char = [^ '\'' '\\' '\n'] | '\\' [^ '\n']
 
 let string_encoding = "u8" | 'u' | 'U' | 'L'
 let char_encoding = 'u' | 'U' | 'L'

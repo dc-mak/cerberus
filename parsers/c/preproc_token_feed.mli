@@ -21,3 +21,7 @@ val lexer : t -> [ `LEXER of Lexing.lexbuf -> Tokens.token ]
 (* The [Cerb_position.t] a synthetic [pos_cnum] keys to; the location seam
    consults this in internal-cpp mode.  [None] if the key is unknown. *)
 val lookup : t -> int -> Cerb_position.t option
+
+(* The spelling of the token whose start position has the given [pos_cnum] key;
+   the parser error path uses this to show the offending lexeme. *)
+val spelling_at : t -> int -> string option

@@ -1,7 +1,16 @@
 open Cerb_frontend
 
-let after_before_msg offset buffer (lexbuf : Lexing.lexbuf) =
-  let show_token (start, curr) =
+(* How to render an offending token in a parser error message differs between
+   the two lexers: the text lexer reads a real lexbuf, so its lexeme can be
+   sliced out of the buffer; the internal-cpp token feed reads a dummy lexbuf, so
+   the lexeme is recovered from its spelling table.  [handle] takes this policy
+   explicitly (rather than via global state), so the two cases stay separate. *)
+type show_token = Lexing.position * Lexing.position -> string
+
+(* Text lexer: slice the offending lexeme out of [lexbuf] (offset accounts for a
+   magic-comment substring's shift). *)
+let text_show_token ~offset (lexbuf : Lexing.lexbuf) : show_token =
+  fun (start, curr) ->
     try
       Lexing.lexeme {
         lexbuf with
@@ -11,13 +20,17 @@ let after_before_msg offset buffer (lexbuf : Lexing.lexbuf) =
     with Invalid_argument _ ->
       Printf.sprintf
         "CPARSER_DRIVER(lex_buffer_len = %d; offset = %d; start_index = %d; end_index = %d)"
-        lexbuf.lex_buffer_len
-        offset
-        (start.pos_cnum - offset)
-        (curr.pos_cnum - offset) in
-  MenhirLib.ErrorReports.show show_token buffer
+        lexbuf.lex_buffer_len offset
+        (start.pos_cnum - offset) (curr.pos_cnum - offset)
 
-let handle parse (token_pos_buffer, lexer) ~offset lexbuf =
+(* Token feed: recover the lexeme from the feed's spelling table by start key. *)
+let feed_show_token feed : show_token =
+  fun (start, _curr) ->
+    match Preproc_token_feed.spelling_at feed start.Lexing.pos_cnum with
+    | Some s -> s
+    | None -> ""
+
+let handle parse (token_pos_buffer, lexer) ~(show_token : show_token) lexbuf =
   let to_pos = C_lexer.LineMap.position in
   try Exception.except_return (parse lexer lexbuf) with
   | C_lexer.Error err ->
@@ -34,7 +47,7 @@ let handle parse (token_pos_buffer, lexer) ~offset lexbuf =
     let message = String.sub message 0 (String.length message - 1) in
     let range = (to_pos (Lexing.lexeme_start_p lexbuf), to_pos (Lexing.lexeme_end_p lexbuf)) in
     let loc = Cerb_location.(region range NoCursor) in
-    let where = after_before_msg offset token_pos_buffer lexbuf in
+    let where = MenhirLib.ErrorReports.show show_token token_pos_buffer in
     Exception.fail (loc, Errors.CPARSER (Errors.Cparser_unexpected_token  (where ^ "\n" ^ message)))
   | Failure msg ->
     prerr_endline "CPARSER_DRIVER (Failure)";
@@ -81,10 +94,11 @@ let parse_loc_string parse (loc, str) =
   Lexing.set_position lexbuf (Cerb_position.to_file_lexing start_pos);
   Lexing.set_filename lexbuf (Option.value ~default:"<none>" (Cerb_location.get_filename loc));
   let `LEXER cn_lexer = C_lexer.create_lexer ~inside_cn:true in
+  let offset = (Cerb_position.to_file_lexing start_pos).pos_cnum in
   handle
     parse
     (MenhirLib.ErrorReports.wrap cn_lexer)
-    ~offset: (Cerb_position.to_file_lexing start_pos).pos_cnum
+    ~show_token:(text_show_token ~offset lexbuf)
     lexbuf
 
 let update_enclosing_region payload_region xs =
@@ -131,7 +145,7 @@ let parse_with_magic_comments lexbuf =
   handle
     C_parser.translation_unit
     (MenhirLib.ErrorReports.wrap c_lexer)
-    ~offset:0
+    ~show_token:(text_show_token ~offset:0 lexbuf)
     lexbuf
 
 let parse lexbuf =
@@ -154,7 +168,8 @@ let parse_tokens ~filename expanded =
   let dummy = Lexing.from_string "" in
   Lexing.set_filename dummy filename;
   let result =
-    handle C_parser.translation_unit (MenhirLib.ErrorReports.wrap lexer) ~offset:0 dummy in
+    handle C_parser.translation_unit (MenhirLib.ErrorReports.wrap lexer)
+      ~show_token:(feed_show_token feed) dummy in
   C_lexer.LineMap.clear_provenance_lookup ();
   Exception.except_bind result magic_comments_to_cn_toplevel
 

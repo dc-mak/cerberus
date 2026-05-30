@@ -5,11 +5,15 @@
 type t =
   { mutable rest : Preproc_location.t Preproc_token.t list
   ; table        : (int, Cerb_position.t) Hashtbl.t
+  ; spellings    : (int, string) Hashtbl.t  (* by start key, for error messages *)
   ; mutable counter : int }
 
-let make toks = { rest = toks; table = Hashtbl.create 256; counter = 0 }
+let make toks =
+  { rest = toks; table = Hashtbl.create 256
+  ; spellings = Hashtbl.create 256; counter = 0 }
 
 let lookup t k = Hashtbl.find_opt t.table k
+let spelling_at t k = Hashtbl.find_opt t.spellings k
 
 (* Map a token's Preproc_location into the macro-expansion notes the diagnostic
    renderer will show: the primary caret is the outermost use site, so the notes
@@ -58,6 +62,11 @@ let emit_positions t lexbuf start_loc end_loc =
   lexbuf.Lexing.lex_curr_p <-
     key_position t (Cerb_position.with_provenance frames (Cerb_position.from_lexing e))
 
+(* Remember a token's spelling under its start-position key, so the parser's
+   error path can show the offending lexeme (it cannot slice the dummy lexbuf). *)
+let record_spelling t lexbuf s =
+  Hashtbl.replace t.spellings lexbuf.Lexing.lex_start_p.pos_cnum s
+
 let rec next t lexbuf =
   match t.rest with
   | [] ->
@@ -71,10 +80,12 @@ let rec next t lexbuf =
        | Preproc_token.Magic m ->
            t.rest <- rest;
            emit_positions t lexbuf (Preproc_token.loc tok) (Preproc_token.loc tok);
+           record_spelling t lexbuf (Preproc_token.spelling tok);
            magic_token (Preproc_token.loc tok) m
        | _ ->
            t.rest <- rest;
            emit_positions t lexbuf (Preproc_token.loc tok) (Preproc_token.loc tok);
+           record_spelling t lexbuf (Preproc_token.spelling tok);
            C_lexer.token_of_string ~inside_cn:false (Preproc_token.spelling tok))
 
 let lexer t = C_lexer.defer_typedef (fun lexbuf -> next t lexbuf)
