@@ -690,5 +690,28 @@ tokens.
 
 ## Post-implementation addendum
 
-_(Placeholder — to be filled in after implementation and review, recording any
-deviations from this plan and lessons learned.)_
+### Progress log
+
+- **C1–C4 done** (commits `(cpp) Add Preproc_location …` through
+  `(cpp) Add reconstruct, cpp_dump and tests`).
+
+### Deviations from the plan
+
+- **C4 CI line deferred.** The plan had C4 add the blocking
+  `./diff-prog.py <cpp_dump> preprocessor/cpp.json` line to
+  `.github/workflows/ci.yml`. Deferred to C18 because (a) the cscout suite only
+  goes fully green at C18, so a blocking step would keep CI red across C5–C17,
+  and (b) CI runs the *installed* `cerberus` binary, whereas `cpp_dump` is an
+  un-installed dune executable — wiring it needs an install/build step best added
+  once. The oracle still runs manually exactly as the README documents. At C4,
+  16 declaration-only goldens pass (cpp31–cpp45, cpp02).
+
+- **`return code: 0` golden prefix.** `diff-prog.py` prepends a
+  `return code: N` line to captured program output, so every golden needs that
+  first line. C0's import omitted it; C4 prepends it to all `cpp/*.c.out` and
+  updates `fetch-cscout.sh` to emit it on future imports.
+
+- **`cpp_dump` location.** Placed in its own subdir `parsers/c/cpp_dump/` (not a
+  bare `(executable)` in `parsers/c/dune`) so the `c_parser` library's
+  `(modules :standard)` does not swallow it; it links `mem_concrete` to satisfy
+  the virtual `cerb_frontend`.
