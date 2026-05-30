@@ -6,6 +6,7 @@
    tokens. *)
 
 module HS = Preproc_token.Hide_set
+module SS = Set.Make (String)
 
 (* --- Token predicates ------------------------------------------------------ *)
 
@@ -392,31 +393,111 @@ let split_lines toks =
   in
   go [] toks
 
-(* Maximal runs of emitting non-directive lines are expanded together (so a
-   function-like invocation may span newlines).  A directive line flushes the
-   pending text, then updates the macro environment / conditional stack and emits
-   nothing.  In a skipped region text lines are dropped, but #if/#endif &c. are
-   still processed so nesting stays balanced. *)
-let run macros lines =
-  let rec go macros conds pending = function
-    | [] -> expand macros (List.concat (List.rev pending))
-    | (ltoks, nl) :: rest ->
-        (match ltoks with
-         | t :: ds when is_punct "#" t ->
-             let flushed =
-               if emitting conds then expand macros (List.concat (List.rev pending))
-               else [] in
-             let macros', conds' = apply_directive macros conds ds in
-             flushed @ go macros' conds' [] rest
-         | _ ->
-             if emitting conds then
-               let chunk = match nl with Some n -> ltoks @ [ n ] | None -> ltoks in
-               go macros conds (chunk :: pending) rest
-             else
-               go macros conds pending rest)
-  in
-  go macros [] [] lines
+(* --- #include resolution ---------------------------------------------------- *)
 
-let preprocess toks =
-  let lifted = List.map (Preproc_token.map Preproc_location.of_lexing) toks in
-  run Macro_table.empty (split_lines lifted)
+(* Read a file and lift it to the engine's located pp-token stream. *)
+let lex_file filename =
+  let ic = open_in filename in
+  let lexbuf = Lexing.from_channel ic in
+  Lexing.set_filename lexbuf filename;
+  let toks = Preproc_lexer.tokens lexbuf in
+  close_in ic;
+  List.map (Preproc_token.map Preproc_location.of_lexing) toks
+
+(* The header name and whether it was the angle-bracket form, from the tokens
+   after `include`.  "..." takes the string-literal content; <...> concatenates
+   the spellings between the brackets.  (Computed/macro includes are not yet
+   handled.) *)
+let include_target ds =
+  match ds with
+  | s :: _ when (match Preproc_token.kind s with
+                 | Preproc_token.String_literal -> true | _ -> false) ->
+      let sp = Preproc_token.spelling s in
+      if String.length sp >= 2 then Some (String.sub sp 1 (String.length sp - 2), false)
+      else None
+  | t :: rest when is_punct "<" t ->
+      let rec collect acc = function
+        | u :: _ when is_punct ">" u -> Some (String.concat "" (List.rev acc))
+        | u :: us -> collect (Preproc_token.spelling u :: acc) us
+        | [] -> None
+      in
+      (match collect [] rest with Some n -> Some (n, true) | None -> None)
+  | _ -> None
+
+(* "..." searches the current file's directory first, then the -I dirs; <...>
+   searches only the -I dirs (no system paths, matching -nostdinc -undef). *)
+let resolve ~include_dirs ~dir ~angled name =
+  let dirs = if angled then include_dirs else dir :: include_dirs in
+  let rec find = function
+    | [] -> None
+    | d :: ds ->
+        let p = Filename.concat d name in
+        if Sys.file_exists p then Some p else find ds
+  in
+  find dirs
+
+(* --- Line-oriented driver (per file, threading macros + #pragma once) ------- *)
+
+(* Process one file's lines.  [conds] is local (a #if must close in its file);
+   [macros] and [once] thread across includes.  Output is accumulated as a
+   reversed list of token chunks.  Emitting runs of non-directive lines are
+   expanded together (function-like invocations may span newlines); a directive
+   flushes the pending text and emits nothing.  In a skipped region text is
+   dropped but conditionals are still tracked. *)
+let rec process_lines ~include_dirs ~dir ~canon macros once acc conds pending lines =
+  match lines with
+  | [] ->
+      (expand macros (List.concat (List.rev pending)) :: acc, macros, once)
+  | (ltoks, nl) :: rest ->
+      (match ltoks with
+       | t :: ds when is_punct "#" t ->
+           let em = emitting conds in
+           let flushed =
+             if em then expand macros (List.concat (List.rev pending)) else [] in
+           let acc = flushed :: acc in
+           (match ds with
+            | d :: drest
+              when em && is_ident d
+                   && String.equal (Preproc_token.spelling d) "include" ->
+                let inc, macros, once = do_include ~include_dirs ~dir macros once drest in
+                process_lines ~include_dirs ~dir ~canon macros once (inc :: acc) conds [] rest
+            | d :: e :: _
+              when em && is_ident d && is_ident e
+                   && String.equal (Preproc_token.spelling d) "pragma"
+                   && String.equal (Preproc_token.spelling e) "once" ->
+                process_lines ~include_dirs ~dir ~canon macros (SS.add canon once) acc conds [] rest
+            | _ ->
+                let macros, conds = apply_directive macros conds ds in
+                process_lines ~include_dirs ~dir ~canon macros once acc conds [] rest)
+       | _ ->
+           if emitting conds then
+             let chunk = match nl with Some n -> ltoks @ [ n ] | None -> ltoks in
+             process_lines ~include_dirs ~dir ~canon macros once acc conds (chunk :: pending) rest
+           else
+             process_lines ~include_dirs ~dir ~canon macros once acc conds pending rest)
+
+(* Resolve and splice an included file, sharing the macro table and honouring
+   #pragma once (keyed by resolved path).  A missing header is skipped silently
+   here; the frontend integration will diagnose it. *)
+and do_include ~include_dirs ~dir macros once ds =
+  match include_target ds with
+  | None -> ([], macros, once)
+  | Some (name, angled) ->
+      (match resolve ~include_dirs ~dir ~angled name with
+       | None -> ([], macros, once)
+       | Some path when SS.mem path once -> ([], macros, once)
+       | Some path ->
+           let lines = split_lines (lex_file path) in
+           let acc, macros, once =
+             process_lines ~include_dirs ~dir:(Filename.dirname path) ~canon:path
+               macros once [] [] [] lines
+           in
+           (List.concat (List.rev acc), macros, once))
+
+let preprocess ~include_dirs ~filename =
+  let lines = split_lines (lex_file filename) in
+  let acc, _, _ =
+    process_lines ~include_dirs ~dir:(Filename.dirname filename) ~canon:filename
+      Macro_table.empty SS.empty [] [] [] lines
+  in
+  List.concat (List.rev acc)

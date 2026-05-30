@@ -6,11 +6,7 @@
 let () =
   match Sys.argv with
   | [| _; path |] ->
-      let ic = open_in path in
-      let lexbuf = Lexing.from_channel ic in
-      Lexing.set_filename lexbuf path;
-      let toks = Cpp.preprocess (Preproc_lexer.tokens lexbuf) in
-      close_in ic;
+      let toks = Cpp.preprocess ~include_dirs:[] ~filename:path in
       print_string (Preproc_output.reconstruct toks)
   | _ ->
       prerr_endline "usage: cpp_dump <file.c>";
