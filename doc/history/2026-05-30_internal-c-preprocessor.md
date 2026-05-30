@@ -721,6 +721,29 @@ tokens.
   - Known minor gap: `0339-invalid-string` reports the lex error at the literal's
     start column rather than the inner bad char (the per-token re-lex loses the
     inner position).
+- **Post-review cleanups (2026-05-31):**
+  - **Structured cpp flags:** the internal path no longer re-parses `-I/-D/-U/
+    -include` out of `cpp_cmd`; `main.ml`'s `mk_cpp_config` builds a structured
+    `Pipeline.cpp_config` (one source of truth, the cc -E string derived from it)
+    threaded via an optional `~cpp_config` on `c_frontend`.
+  - **Location recovery without a global:** removed the `provenance_lookup` global
+    from `c_lexer`'s `LineMap`.  The parser now builds the tree with *raw*
+    positions (feed positions carry a side-table key in `pos_cnum`); a pure
+    `recover = { enrich; show_token }` value, threaded per lexer kind, resolves
+    them — error locations in `handle`, the whole tree via
+    `Cabs_location_map.enrich` (an **eager** structural traversal over Cabs +
+    `Symbol.identifier` + `Annot.attributes`; CN/constants untouched; `-w @8`
+    enforces completeness).  Text path uses `enrich = Fun.id` (traversal skipped).
+    `[[` is lexed as one token in `preproc_lexer` (LBRACK_LBRACK kept — two-LBRACK
+    grammar gives 56 array-vs-attribute conflicts).  Strings/chars lexed
+    leniently so invalid escapes don't crash the feed.
+  - **TODOs (deferred, agreed with user):** (1) a *lazy* scheme mapping positions
+    only just before printing, and/or a *switch* between eager/lazy (eager chosen
+    now for simplicity + zero API change for library backends); (2) once the
+    engine is fully working, **investigate Menhir's incremental API** to tidy the
+    driver/seam; (3) honour `conf.cpp_save` on the internal path; (4) 0339's
+    inner-char column for invalid-string lex errors.
+
 - **Remaining:** C15 (render "expanded from:" notes), C17 (macros in magic
   comments), C18 (trigraphs/line splicing).
 
