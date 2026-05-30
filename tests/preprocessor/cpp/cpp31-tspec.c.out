@@ -1,3 +1,4 @@
+return code: 0
 void* a;
 char b;
 signed char c;

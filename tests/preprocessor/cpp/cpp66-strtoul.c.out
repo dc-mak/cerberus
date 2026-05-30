@@ -1,3 +1,4 @@
+return code: 0
 main() 
 { 
 long a = (long)(~0U); 

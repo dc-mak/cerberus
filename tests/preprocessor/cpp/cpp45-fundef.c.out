@@ -1,3 +1,4 @@
+return code: 0
 static int new_fun(double size)
 {
 return new_fun(2 + size);

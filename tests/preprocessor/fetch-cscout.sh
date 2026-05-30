@@ -42,11 +42,13 @@ for c in $names; do
     # (Some goldens have trailing spaces on the preamble lines, so trim them.)
     l1=$(sed -n '1p' "$dst/$c.out.raw" | sed 's/[[:space:]]*$//')
     l2=$(sed -n '2p' "$dst/$c.out.raw" | sed 's/[[:space:]]*$//')
+    # diff-prog.py prepends a "return code: N" line to a program's captured
+    # output, so the golden must start with the matching line (cpp_dump exits 0).
     if [ "$l1" = "$preamble1" ] && [ "$l2" = "$preamble2" ]; then
-      tail -n +3 "$dst/$c.out.raw" > "$dst/$c.out"
+      { printf 'return code: 0\n'; tail -n +3 "$dst/$c.out.raw"; } > "$dst/$c.out"
     else
       echo "WARN: unexpected preamble in $c.out (kept verbatim)" >&2
-      cp "$dst/$c.out.raw" "$dst/$c.out"
+      { printf 'return code: 0\n'; cat "$dst/$c.out.raw"; } > "$dst/$c.out"
     fi
     rm -f "$dst/$c.out.raw"
   else

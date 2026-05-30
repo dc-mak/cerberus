@@ -1,3 +1,4 @@
+return code: 0
 new2(int a, int *b, void (c)(int k))
 {
 int k;

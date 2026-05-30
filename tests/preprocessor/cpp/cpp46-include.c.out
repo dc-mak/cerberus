@@ -1,3 +1,4 @@
+return code: 0
 void __assert (const char *, int, const char *);
 extern const unsigned char *_ctype_;
 extern const short *_tolower_tab_;
