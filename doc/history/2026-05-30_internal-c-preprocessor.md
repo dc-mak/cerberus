@@ -698,8 +698,31 @@ tokens.
   `#include`/`#pragma once`. **40/76 cscout goldens pass**; the rest need cscout
   whitespace quirks (double-space, trailing-space), absent headers, varargs edge
   cases, or phase-1/2 (C18).
-- **Integration design revised & approved (see below).** C11–C16 (frontend
-  integration) not yet started.
+- **C11–C16 + C14b done — frontend integration complete and parity-verified.**
+  `--sw internal_cpp` parses real files via the in-tree cpp. Differential parity
+  over `tests/ci` (gensym-normalised): **136/136 elaboration/UB files and 113/114
+  parse-error files byte-identical** to the external `cc -E` path; the external
+  default path passes `run-ci.sh` 188/0; cscout oracle 40.
+  - C12 exposes `C_lexer.token_of_string` + `defer_typedef` (decoder reuse, keeps
+    the `` `LEXER `` staging); C13 `Preproc_token_feed` (side-table positions +
+    spelling table); C14 wires `SW_internal_cpp` + the `LineMap.position`
+    provenance hook + `pipeline.ml` dispatch; C14b plumbs `-I/-D/-U/-include` from
+    `conf.cpp_cmd` (so bundled `libc/include` + `builtins.h` resolve).
+  - **`[[`**: kept as `LBRACK_LBRACK`; `preproc_lexer.mll` matches
+    `'[' whitespace* '['` as one token (like c_lexer's `lbrack_lbrack`).
+    Removing the token and using two `LBRACK` in the grammar was tried and
+    **rejected** — it adds 56 array-declarator-vs-attribute shift/reduce
+    conflicts (LR(1) can't tell `int a[3][...]` from a following attribute).
+  - **C16 error reporting**: the "show offending token" policy is threaded
+    explicitly through `handle` (`text_show_token` vs `feed_show_token`) — **no
+    mutable global** in `c_parser_driver`. A syntax error on a macro-produced
+    token reports the right lexeme at the macro use site. `preproc_lexer` is
+    lenient on string/char literals so invalid escapes don't crash the feed.
+  - Known minor gap: `0339-invalid-string` reports the lex error at the literal's
+    start column rather than the inner bad char (the per-token re-lex loses the
+    inner position).
+- **Remaining:** C15 (render "expanded from:" notes), C17 (macros in magic
+  comments), C18 (trigraphs/line splicing).
 
 ### Integration revision (approved 2026-05-30)
 
