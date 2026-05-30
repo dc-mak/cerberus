@@ -177,36 +177,21 @@ let cpp (conf, io) ~filename =
         return txt
   end ()
 
-(* Extract the -I / -D / -U / -include flags from the cc -E command line the
-   driver built, so the internal preprocessor uses the same header search dirs,
-   predefined macros and forced includes (builtins.h).  Other tokens (cc, -std,
-   -E, -nostdinc, …) are irrelevant to the in-tree engine and ignored. *)
-let cpp_flags_of_cmd cmd =
-  let toks =
-    Str.split (Str.regexp "[ \t]+") cmd |> List.filter (fun s -> s <> "") in
-  let starts_with pfx s =
-    String.length s >= String.length pfx && String.sub s 0 (String.length pfx) = pfx in
-  let drop pfx s = String.sub s (String.length pfx) (String.length s - String.length pfx) in
-  let rec go incl defs undefs forced = function
-    | [] -> (List.rev incl, List.rev defs, List.rev undefs, List.rev forced)
-    | t :: rest when starts_with "-I" t ->
-        go (drop "-I" t :: incl) defs undefs forced rest
-    | t :: rest when starts_with "-D" t ->
-        let body = drop "-D" t in
-        let def =
-          match String.index_opt body '=' with
-          | Some i -> (String.sub body 0 i, Some (String.sub body (i + 1) (String.length body - i - 1)))
-          | None -> (body, None)
-        in
-        go incl (def :: defs) undefs forced rest
-    | t :: rest when starts_with "-U" t ->
-        go incl defs (drop "-U" t :: undefs) forced rest
-    | "-include" :: f :: rest -> go incl defs undefs (f :: forced) rest
-    | _ :: rest -> go incl defs undefs forced rest
-  in
-  go [] [] [] [] toks
+(* The header search dirs, predefined macros and forced includes the internal
+   preprocessor needs — the same structured data the driver uses to build the
+   cc -E command line, threaded through rather than re-parsed out of [cpp_cmd].
+   Defaults empty for callers that do not use the internal cpp. *)
+type cpp_config =
+  { cpp_include_dirs    : string list
+  ; cpp_defines         : (string * string option) list
+  ; cpp_undefs          : string list
+  ; cpp_forced_includes : string list }
 
-let c_frontend ?(cn_init_scope=Cn_desugaring.empty_init) (conf, io) (core_stdlib, core_impl) ~filename =
+let empty_cpp_config =
+  { cpp_include_dirs = []; cpp_defines = []; cpp_undefs = []; cpp_forced_includes = [] }
+
+let c_frontend ?(cn_init_scope=Cn_desugaring.empty_init)
+    ?(cpp_config=empty_cpp_config) (conf, io) (core_stdlib, core_impl) ~filename =
   Cerb_fresh.set_digest filename;
   let parse_messages cabs_tunit =
     io.set_progress "CPARS" >>= fun () ->
@@ -271,13 +256,16 @@ let c_frontend ?(cn_init_scope=Cn_desugaring.empty_init) (conf, io) (core_stdlib
   io.print_debug 2 (fun () -> "Using the C frontend") >>= fun () ->
   (if Switches.has_switch Switches.SW_internal_cpp then
      (* In-tree preprocessor: lex+expand the source ourselves and feed located
-        tokens straight to the parser (no cc -E, no text round-trip).  Reuse the
-        very flags the driver built for cc -E (-I / -D / -U / -include) so the
-        bundled libc headers and builtins resolve identically. *)
-     let include_dirs, predefined, undefs, forced_includes =
-       cpp_flags_of_cmd conf.cpp_cmd in
+        tokens straight to the parser (no cc -E, no text round-trip).  Uses the
+        same structured -I / -D / -U / -include the driver built for cc -E, so
+        the bundled libc headers and builtins resolve identically. *)
      let expanded =
-       Cpp.preprocess ~include_dirs ~predefined ~undefs ~forced_includes ~filename in
+       Cpp.preprocess
+         ~include_dirs:cpp_config.cpp_include_dirs
+         ~predefined:cpp_config.cpp_defines
+         ~undefs:cpp_config.cpp_undefs
+         ~forced_includes:cpp_config.cpp_forced_includes
+         ~filename in
      C_parser_driver.parse_tokens ~filename expanded >>= parse_messages
    else
      cpp (conf, io) ~filename >>= fun file_content ->
@@ -287,8 +275,9 @@ let c_frontend ?(cn_init_scope=Cn_desugaring.empty_init) (conf, io) (core_stdlib
   ail_typechecking ail_prog   >>= fun ailtau_prog             ->
   return (cabs_tunit, (markers_env, ailtau_prog))
 
-let c_frontend_and_elaboration ?(cn_init_scope=Cn_desugaring.empty_init) (conf, io) (core_stdlib, core_impl) ~filename =
-  c_frontend ~cn_init_scope (conf, io) (core_stdlib, core_impl) ~filename >>= fun (cabs_tunit, (markers_env, ailtau_prog)) ->
+let c_frontend_and_elaboration ?(cn_init_scope=Cn_desugaring.empty_init)
+    ?(cpp_config=empty_cpp_config) (conf, io) (core_stdlib, core_impl) ~filename =
+  c_frontend ~cn_init_scope ~cpp_config (conf, io) (core_stdlib, core_impl) ~filename >>= fun (cabs_tunit, (markers_env, ailtau_prog)) ->
   (* NOTE: the elaboration sets the struct/union tag definitions, so to allow the frontend to be
      used more than once, we need to do reset here *)
   (* TODO(someday): find a better way *)

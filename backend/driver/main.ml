@@ -20,13 +20,13 @@ let is_cheri_memory () =
       | Invalid_argument _ -> false in
   starts_with ~prefix:"cheri" Impl_mem.name
 
-let frontend (conf, io) ~is_lib filename core_std =
+let frontend ?(cpp_config=empty_cpp_config) (conf, io) ~is_lib filename core_std =
   if not (Sys.file_exists filename) then
     error ("The file `" ^ filename ^ "' doesn't exist.");
   if Filename.check_suffix filename ".co" || Filename.check_suffix filename ".o" then
     read_core_object (conf, io) ~is_lib core_std filename
   else if Filename.check_suffix filename ".c" then
-    c_frontend_and_elaboration (conf, io) core_std ~filename >>= fun (_, _, core_file) ->
+    c_frontend_and_elaboration ~cpp_config (conf, io) core_std ~filename >>= fun (_, _, core_file) ->
     core_passes (conf, io) ~filename core_file
   else if Filename.check_suffix filename ".core" then
     core_frontend (conf, io) core_std ~filename
@@ -35,20 +35,32 @@ let frontend (conf, io) ~is_lib filename core_std =
     Exception.fail (Cerb_location.unknown, Errors.UNSUPPORTED
                       "The file extention is not supported")
 
-let create_cpp_cmd cpp_cmd nostdinc macros_def macros_undef incl_dirs incl_files nolibc =
+(* The structured preprocessor flags: search dirs (with the bundled libc unless
+   -nostdinc), the predefined macros Cerberus injects (__cerb__, CERB_WITH_LIB,
+   …) plus user -D, the -U undefs, and the forced includes (builtins.h first).
+   This is the single source of truth — the cc -E command line is built from it,
+   and the internal cpp (SW_internal_cpp) is handed it directly. *)
+let mk_cpp_config ~nostdinc ~nolibc ~syntax_only macros_def macros_undef incl_dirs incl_files =
   let libc_dirs = Cerb_runtime.[in_runtime "libc/include"; in_runtime "libc/include/posix"] in
-  let incl_dirs = if nostdinc then incl_dirs else libc_dirs @ incl_dirs in
-  let macros_def = if nolibc then macros_def else ("CERB_WITH_LIB", None) :: macros_def in
-  let macros_def = if is_cheri_memory () then ("__CHERI__", None) :: macros_def else macros_def in
+  let cpp_include_dirs = if nostdinc then incl_dirs else libc_dirs @ incl_dirs in
+  let defines = macros_def in
+  let defines = if nolibc then defines else ("CERB_WITH_LIB", None) :: defines in
+  let defines = if is_cheri_memory () then ("__CHERI__", None) :: defines else defines in
+  let defines = ("__cerb__", None) :: defines in
+  let defines = if syntax_only then ("__cerb_syntax_only__", None) :: defines else defines in
+  let cpp_forced_includes = Cerb_runtime.in_runtime "libc/include/builtins.h" :: incl_files in
+  { cpp_include_dirs; cpp_defines = defines; cpp_undefs = macros_undef; cpp_forced_includes }
+
+let create_cpp_cmd base_cmd cfg =
   String.concat " " begin
-    cpp_cmd ::
+    base_cmd ::
     List.map (function
         | (str1, None)      -> "-D" ^ str1
         | (str1, Some str2) -> "-D" ^ str1 ^ "=" ^ str2
-      ) macros_def @
-    List.map (fun str -> "-U" ^ str) macros_undef @
-    List.map (fun str -> "-I" ^ str) incl_dirs @
-    List.map (fun str -> "-include " ^ str) (Cerb_runtime.in_runtime "libc/include/builtins.h" :: incl_files)
+      ) cfg.cpp_defines @
+    List.map (fun str -> "-U" ^ str) cfg.cpp_undefs @
+    List.map (fun str -> "-I" ^ str) cfg.cpp_include_dirs @
+    List.map (fun str -> "-include " ^ str) cfg.cpp_forced_includes
   end
 
 let core_libraries incl lib_paths libs =
@@ -104,10 +116,9 @@ let cerberus debug_level progress core_obj
              files args_opt =
   Cerb_debug.debug_level := debug_level;
   Cerb_runtime.specified_runtime := runtime_path_opt;
-  let cpp_cmd =
-    let cpp_cmd = if syntax_only then cpp_cmd ^ " -D__cerb_syntax_only__" else cpp_cmd in
-    create_cpp_cmd cpp_cmd nostdinc macros macros_undef incl_dirs incl_files nolibc
-  in
+  let cpp_config =
+    mk_cpp_config ~nostdinc ~nolibc ~syntax_only macros macros_undef incl_dirs incl_files in
+  let cpp_cmd = create_cpp_cmd cpp_cmd cpp_config in
   let args = match args_opt with
     | None -> []
     | Some args -> Str.split (Str.regexp "[ \t]+") args
@@ -151,7 +162,7 @@ let cerberus debug_level progress core_obj
   in
   let main core_std =
     Exception.except_foldlM (fun core_files (is_lib, file) ->
-      frontend ~is_lib (conf, io) file core_std >>= fun core_file ->
+      frontend ~cpp_config ~is_lib (conf, io) file core_std >>= fun core_file ->
       return (core_file::core_files)
     ) [] (core_libraries (not nolibc && not core_obj) link_lib_path link_core_obj @ (List.map (fun z -> (false, z)) files))
   in
@@ -221,7 +232,7 @@ let cerberus debug_level progress core_obj
     | [] ->
       Pp_errors.fatal "no input file"
     | [file] when core_obj ->
-      prelude >>= frontend (conf, io) ~is_lib:false file >>= fun core_file ->
+      prelude >>= frontend ~cpp_config (conf, io) ~is_lib:false file >>= fun core_file ->
       begin match output_name with
         | Some output_file ->
           write_core_object core_file output_file
@@ -243,7 +254,7 @@ let cerberus debug_level progress core_obj
       else if core_obj then
         prelude >>= fun core_std ->
         Exception.except_foldlM (fun () file ->
-          frontend (conf, io) ~is_lib:false file core_std >>= fun core_file ->
+          frontend ~cpp_config (conf, io) ~is_lib:false file core_std >>= fun core_file ->
           let output_file = Filename.remove_extension file ^ ".co" in
           write_core_object core_file output_file;
           return ()
@@ -253,7 +264,7 @@ let cerberus debug_level progress core_obj
       else if syntax_only && List.for_all (fun z -> Filename.check_suffix z ".c") files then
         prelude >>= fun core_std ->
         Exception.except_mapM (fun filename ->
-          c_frontend (conf, io) core_std ~filename
+          c_frontend ~cpp_config (conf, io) core_std ~filename
         ) files >>= fun _ ->
         return success
         (* Link and execute *)
@@ -336,7 +347,9 @@ let output_file =
 
 let cpp_cmd =
   let doc = "Command to call for the C preprocessing." in
-  Arg.(value & opt string ("cc -std=c11 -E -CC -Werror -Wno-builtin-macro-redefined -nostdinc -undef -D__cerb__")
+  (* __cerb__ is now injected structurally (mk_cpp_config) so both the external
+     cc -E and the internal cpp see it; keep it out of the default command. *)
+  Arg.(value & opt string ("cc -std=c11 -E -CC -Werror -Wno-builtin-macro-redefined -nostdinc -undef")
              & info ["cpp"] ~docv:"CMD" ~doc)
 
 let cpp_only =

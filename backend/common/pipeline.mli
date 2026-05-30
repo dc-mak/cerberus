@@ -21,6 +21,17 @@ type configuration = {
   cpp_save: string option; (* Save the result of pre-processing to this file *)
 }
 
+(* Structured preprocessor flags for the internal cpp (SW_internal_cpp), threaded
+   from the driver instead of being re-parsed out of [cpp_cmd]. *)
+type cpp_config = {
+  cpp_include_dirs    : string list;
+  cpp_defines         : (string * string option) list;
+  cpp_undefs          : string list;
+  cpp_forced_includes : string list;
+}
+
+val empty_cpp_config : cpp_config
+
 type io_helpers = {
   pass_message: string -> (unit, Errors.error) Exception.exceptM;
   set_progress: string -> (unit, Errors.error) Exception.exceptM;
@@ -47,6 +58,7 @@ val cpp: (configuration * io_helpers) -> filename:string -> (string, Cerb_locati
 
 val c_frontend:
   ?cn_init_scope: Cn_desugaring.init_scope ->
+  ?cpp_config: cpp_config ->
   (configuration * io_helpers) ->
   (((string, Symbol.sym) Pmap.map * (unit, unit) Core.generic_fun_map) * unit Core.generic_impl) ->
   filename:string ->
@@ -56,6 +68,7 @@ val c_frontend:
 
 val c_frontend_and_elaboration:
   ?cn_init_scope: Cn_desugaring.init_scope ->
+  ?cpp_config: cpp_config ->
   (configuration * io_helpers) ->
   (((string, Symbol.sym) Pmap.map * (unit, unit) Core.generic_fun_map) * unit Core.generic_impl) ->
   filename:string ->
