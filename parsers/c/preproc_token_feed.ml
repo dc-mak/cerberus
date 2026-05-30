@@ -47,6 +47,17 @@ let magic_token loc (m : Preproc_token.magic) =
     Cerb_location.region (payload_start, payload_end) Cerb_location.NoCursor in
   Tokens.CERB_MAGIC (region, (m.delimiter, m.payload))
 
+(* Set the lexbuf positions for a token spanning [start_loc].[end_loc], keying
+   the side table to the precomputed Cerb_positions (provenance from start). *)
+let emit_positions t lexbuf start_loc end_loc =
+  let frames = macro_frames start_loc in
+  let s, _ = Preproc_location.primary start_loc in
+  let _, e = Preproc_location.primary end_loc in
+  lexbuf.Lexing.lex_start_p <-
+    key_position t (Cerb_position.with_provenance frames (Cerb_position.from_lexing s));
+  lexbuf.Lexing.lex_curr_p <-
+    key_position t (Cerb_position.with_provenance frames (Cerb_position.from_lexing e))
+
 let rec next t lexbuf =
   match t.rest with
   | [] ->
@@ -55,19 +66,15 @@ let rec next t lexbuf =
       lexbuf.Lexing.lex_curr_p <- p;
       Tokens.EOF
   | tok :: rest ->
-      t.rest <- rest;
       (match Preproc_token.kind tok with
-       | Preproc_token.Newline -> next t lexbuf
-       | kind ->
-           let loc = Preproc_token.loc tok in
-           let frames = macro_frames loc in
-           let s, e = Preproc_location.primary loc in
-           let start_cp = Cerb_position.with_provenance frames (Cerb_position.from_lexing s) in
-           let end_cp = Cerb_position.with_provenance frames (Cerb_position.from_lexing e) in
-           lexbuf.Lexing.lex_start_p <- key_position t start_cp;
-           lexbuf.Lexing.lex_curr_p <- key_position t end_cp;
-           (match kind with
-            | Preproc_token.Magic m -> magic_token loc m
-            | _ -> C_lexer.token_of_string ~inside_cn:false (Preproc_token.spelling tok)))
+       | Preproc_token.Newline -> t.rest <- rest; next t lexbuf
+       | Preproc_token.Magic m ->
+           t.rest <- rest;
+           emit_positions t lexbuf (Preproc_token.loc tok) (Preproc_token.loc tok);
+           magic_token (Preproc_token.loc tok) m
+       | _ ->
+           t.rest <- rest;
+           emit_positions t lexbuf (Preproc_token.loc tok) (Preproc_token.loc tok);
+           C_lexer.token_of_string ~inside_cn:false (Preproc_token.spelling tok))
 
 let lexer t = C_lexer.defer_typedef (fun lexbuf -> next t lexbuf)

@@ -494,10 +494,40 @@ and do_include ~include_dirs ~dir macros once ds =
            in
            (List.concat (List.rev acc), macros, once))
 
-let preprocess ~include_dirs ~filename =
-  let lines = split_lines (lex_file filename) in
-  let acc, _, _ =
-    process_lines ~include_dirs ~dir:(Filename.dirname filename) ~canon:filename
-      Macro_table.empty SS.empty [] [] [] lines
+(* Lex a -D macro value (or "1" for a bare -DNAME) into a replacement list. *)
+let lex_value s =
+  Preproc_lexer.tokens (Lexing.from_string s)
+  |> List.filter (fun t -> not (is_newline t))
+  |> List.map (Preproc_token.map Preproc_location.of_lexing)
+
+let rec seed_defines macros = function
+  | [] -> macros
+  | (name, v) :: rest ->
+      let body = lex_value (match v with Some s -> s | None -> "1") in
+      let macros =
+        match Macro_table.define name (Macro_table.Object_like body) macros with
+        | Ok m -> m
+        | Error _ -> macros
+      in
+      seed_defines macros rest
+
+let rec seed_undefs macros = function
+  | [] -> macros
+  | name :: rest -> seed_undefs (Macro_table.undef name macros) rest
+
+let preprocess ~include_dirs ~predefined ~undefs ~forced_includes ~filename =
+  let macros0 = seed_undefs (seed_defines Macro_table.empty predefined) undefs in
+  (* Forced includes (e.g. builtins.h) are processed before the main file, as if
+     textually included at the top: their output is prepended and their macros
+     thread into the main file. *)
+  let rec go macros once acc = function
+    | [] -> List.concat (List.rev acc)
+    | f :: fs ->
+        let lines = split_lines (lex_file f) in
+        let out_acc, macros, once =
+          process_lines ~include_dirs ~dir:(Filename.dirname f) ~canon:f
+            macros once [] [] [] lines
+        in
+        go macros once (List.concat (List.rev out_acc) :: acc) fs
   in
-  List.concat (List.rev acc)
+  go macros0 SS.empty [] (forced_includes @ [ filename ])

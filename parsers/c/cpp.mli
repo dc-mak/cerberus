@@ -14,5 +14,8 @@
 
 val preprocess :
   include_dirs:string list ->
+  predefined:(string * string option) list ->
+  undefs:string list ->
+  forced_includes:string list ->
   filename:string ->
   Preproc_location.t Preproc_token.t list

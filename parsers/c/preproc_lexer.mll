@@ -61,6 +61,9 @@ let char_const = char_encoding? "'" c_char+ "'"
    the rest are carried through verbatim by spelling. *)
 let punctuator =
     "%:%:" | "..." | "<<=" | ">>="
+  (* Cerberus/CN extensions c_lexer also recognises (kept as single tokens so the
+     feed's re-lex matches: :: scope, ?: GNU, {-{ ||| }-} thread syntax). *)
+  | "{-{" | "}-}" | "|||" | "::" | "?:"
   | "->" | "++" | "--" | "<<" | ">>" | "<=" | ">=" | "==" | "!="
   | "&&" | "||" | "*=" | "/=" | "%=" | "+=" | "-=" | "&=" | "^=" | "|="
   | "##" | "<:" | ":>" | "<%" | "%>" | "%:"
@@ -101,6 +104,10 @@ rule one space = parse
   | char_const     { Tok (mk space Preproc_token.Char_const lexbuf) }
   | pp_number      { Tok (mk space Preproc_token.Pp_number lexbuf) }
   | identifier     { Tok (mk space Preproc_token.Identifier lexbuf) }
+  (* C2x attribute opener: kept as one token (matching c_lexer's lbrack_lbrack)
+     so the feed's re-lex yields LBRACK_LBRACK rather than two LBRACK, which the
+     grammar needs to disambiguate from array declarators. *)
+  | '[' whitespace_char* '[' { Tok (mk space Preproc_token.Punctuator lexbuf) }
   | punctuator     { Tok (mk space Preproc_token.Punctuator lexbuf) }
 
   | eof { Done }
