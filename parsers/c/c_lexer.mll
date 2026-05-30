@@ -690,24 +690,43 @@ type lexer_state =
   | LSRegular
   | LSIdentifier of string
 
+let lexer_flags ~inside_cn =
+  let at_magic_comments = Switches.(has_switch SW_at_magic_comments) in
+  let magic_comment_char =
+    if Switches.(has_switch SW_magic_comment_char_dollar) then '$' else '@' in
+  { inside_cn; at_magic_comments; magic_comment_char }
 
-let create_lexer ~(inside_cn:bool) : [ `LEXER of lexbuf -> token ] =
+(* The typedef "lexer hack" (Jourdan–Pottier): wrap a raw one-token producer so
+   that after each LNAME/UNAME it emits a TYPE/VARIABLE marker on the *next* pull,
+   classified live against Lexer_feedback (which the parser mutates).  The marker
+   pull advances neither input nor positions, so the marker inherits the name's
+   $startpos/$endpos.
+
+   This is the sole allocator of the per-parse deferral state and the emitter of
+   the `LEXER staging tag, so callers must construct once then pull and cannot
+   share one instance's state across parses.  The internal-preprocessor token
+   feed reuses it over the same Lexer_feedback global, with its own raw producer
+   in place of `initial`. *)
+let defer_typedef (raw : lexbuf -> token) : [ `LEXER of lexbuf -> token ] =
   let lexer_state = ref LSRegular in
   `LEXER (fun lexbuf ->
-  match !lexer_state with
-  | LSRegular ->
-      let at_magic_comments = Switches.(has_switch SW_at_magic_comments) in
-      let magic_comment_char =
-        if Switches.(has_switch SW_magic_comment_char_dollar)
-        then '$'
-        else '@'
-      in
-      begin match initial { inside_cn; at_magic_comments; magic_comment_char } lexbuf with
-      | LNAME i as tok -> lexer_state := LSIdentifier i; tok
-      | UNAME i as tok -> lexer_state := LSIdentifier i; tok
-      | _      as tok -> lexer_state := LSRegular; tok
-      end
-  | LSIdentifier i ->
-      lexer_state := LSRegular;
-      if Lexer_feedback.is_typedefname i then TYPE else VARIABLE)
+    match !lexer_state with
+    | LSRegular ->
+        begin match raw lexbuf with
+        | (LNAME i | UNAME i) as tok -> lexer_state := LSIdentifier i; tok
+        | tok -> lexer_state := LSRegular; tok
+        end
+    | LSIdentifier i ->
+        lexer_state := LSRegular;
+        if Lexer_feedback.is_typedefname i then TYPE else VARIABLE)
+
+let create_lexer ~(inside_cn:bool) : [ `LEXER of lexbuf -> token ] =
+  defer_typedef (fun lexbuf -> initial (lexer_flags ~inside_cn) lexbuf)
+
+(* Decode one already-isolated token spelling through the lexer's own
+   constant/keyword/string rules, so the internal preprocessor's feed produces
+   exactly the Tokens.token c_lexer would.  Returns LNAME/UNAME for identifiers
+   (no typedef deferral here — the feed wraps this with defer_typedef). *)
+let token_of_string ~(inside_cn:bool) (s : string) : token =
+  initial (lexer_flags ~inside_cn) (Lexing.from_string s)
 }
