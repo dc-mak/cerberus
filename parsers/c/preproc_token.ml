@@ -33,6 +33,8 @@ let loc t = t.loc
 
 let with_hide_set hide_set t = { t with hide_set }
 
+let with_preceded_by_space preceded_by_space t = { t with preceded_by_space }
+
 let map f t = { t with loc = f t.loc }
 
 (* A token-kind ordering used only to give [compare] a total order; the integer

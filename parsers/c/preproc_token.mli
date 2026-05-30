@@ -52,6 +52,10 @@ val loc : 'loc t -> 'loc
 (* Functional update of the hide set (Prosser's [hsadd]). *)
 val with_hide_set : Hide_set.t -> 'loc t -> 'loc t
 
+(* Functional update of the leading-space flag; used when newlines collapse to
+   whitespace during macro-argument collection. *)
+val with_preceded_by_space : bool -> 'loc t -> 'loc t
+
 (* Rewrite only the location, e.g. lift [of_lexing] or push an expansion frame. *)
 val map : ('a -> 'b) -> 'a t -> 'b t
 
