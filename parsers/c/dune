@@ -7,7 +7,7 @@
  (wrapped false)
  (libraries menhirLib cerb_frontend))
 
-(ocamllex c_lexer)
+(ocamllex c_lexer preproc_lexer)
 (menhir
  (flags (--external-tokens Tokens --exn-carries-state))
  (modules c_parser))
