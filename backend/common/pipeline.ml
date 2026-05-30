@@ -179,8 +179,7 @@ let cpp (conf, io) ~filename =
 
 let c_frontend ?(cn_init_scope=Cn_desugaring.empty_init) (conf, io) (core_stdlib, core_impl) ~filename =
   Cerb_fresh.set_digest filename;
-  let parse filename file_content =
-    C_parser_driver.parse_from_string ~filename file_content >>= fun cabs_tunit ->
+  let parse_messages cabs_tunit =
     io.set_progress "CPARS" >>= fun () ->
     io.pass_message "C parsing completed!" >>= fun () ->
     whenM (List.mem Cabs conf.astprints) begin
@@ -189,6 +188,8 @@ let c_frontend ?(cn_init_scope=Cn_desugaring.empty_init) (conf, io) (core_stdlib
     whenM (List.mem Cabs conf.pprints) begin
       fun () -> io.warn (fun () -> "TODO: Cabs pprint to yet supported")
     end >>= fun () -> return cabs_tunit in
+  let parse filename file_content =
+    C_parser_driver.parse_from_string ~filename file_content >>= parse_messages in
   (* -- *)
   let mk_pp_program pp fout_opt file =
     let fout_opt = List.assoc_opt Ail conf.ppouts in
@@ -239,8 +240,15 @@ let c_frontend ?(cn_init_scope=Cn_desugaring.empty_init) (conf, io) (core_stdlib
     end >>= fun () -> return ailtau_prog in
   (* -- *)
   io.print_debug 2 (fun () -> "Using the C frontend") >>= fun () ->
-  cpp (conf, io) ~filename    >>= fun file_content            ->
-  parse filename file_content >>= fun cabs_tunit              ->
+  (if Switches.has_switch Switches.SW_internal_cpp then
+     (* In-tree preprocessor: lex+expand the source ourselves and feed located
+        tokens straight to the parser (no cc -E, no text round-trip). *)
+     let expanded = Cpp.preprocess ~include_dirs:[] ~filename in
+     C_parser_driver.parse_tokens ~filename expanded >>= parse_messages
+   else
+     cpp (conf, io) ~filename >>= fun file_content ->
+     parse filename file_content)
+                              >>= fun cabs_tunit              ->
   desugar cabs_tunit          >>= fun (markers_env, ail_prog) ->
   ail_typechecking ail_prog   >>= fun ailtau_prog             ->
   return (cabs_tunit, (markers_env, ailtau_prog))

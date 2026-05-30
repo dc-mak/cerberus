@@ -43,6 +43,9 @@ type cerb_switch =
   (* eliminate pure expr rebindings: let pat = C[pure(pexpr)] -> substitute pexpr *)
   | SW_copy_prop
 
+  (* preprocess C with the in-tree preprocessor instead of external cc -E *)
+  | SW_internal_cpp
+
 
 let internal_ref =
   ref []
@@ -99,6 +102,8 @@ let set strs =
         Some (SW_magic_comment_char_dollar)
     | "copy_prop" ->
         Some SW_copy_prop
+    | "internal_cpp" ->
+        Some SW_internal_cpp
     | _ ->
         None in
   let pred x = function
@@ -128,7 +133,8 @@ let set strs =
     | SW_zero_initialised
     | SW_at_magic_comments
     | SW_magic_comment_char_dollar
-    | SW_copy_prop as y ->
+    | SW_copy_prop
+    | SW_internal_cpp as y ->
         x = y in
   List.iter (fun str ->
     match read_switch str with

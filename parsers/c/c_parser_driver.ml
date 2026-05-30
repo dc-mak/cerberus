@@ -140,6 +140,24 @@ let parse lexbuf =
   Exception.except_bind (parse_with_magic_comments lexbuf)
     magic_comments_to_cn_toplevel
 
+(* Parse a token stream produced by the internal preprocessor.  The feed supplies
+   Tokens.token directly (decoded through c_lexer); its side-table lookup is
+   installed into the location seam so $startpos/$endpos resolve to the original
+   source positions (with macro provenance).  A dummy lexbuf carries the synthetic
+   positions; LineMap is still init'd to [filename] so the magic-comment CN re-lex
+   path (which clears the lookup) reports the right file. *)
+let parse_tokens ~filename expanded =
+  C_lexer.LineMap.init filename;
+  let feed = Preproc_token_feed.make expanded in
+  C_lexer.LineMap.set_provenance_lookup (Preproc_token_feed.lookup feed);
+  let `LEXER lexer = Preproc_token_feed.lexer feed in
+  let dummy = Lexing.from_string "" in
+  Lexing.set_filename dummy filename;
+  let result =
+    handle C_parser.translation_unit (MenhirLib.ErrorReports.wrap lexer) ~offset:0 dummy in
+  C_lexer.LineMap.clear_provenance_lookup ();
+  Exception.except_bind result magic_comments_to_cn_toplevel
+
 let parse_from_channel input =
   let read f input =
     let channel = open_in input in

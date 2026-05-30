@@ -39,3 +39,14 @@ val parse_from_string :
   (Cerb_frontend.Cabs.translation_unit,
    Cerb_location.t * Cerb_frontend.Errors.cause)
   Cerb_frontend.Exception.exceptM
+
+
+(** Parse a C translation unit from a token stream produced by the internal
+    preprocessor (Cpp.preprocess), used when the [internal_cpp] switch is set.
+    [filename] names the original source. *)
+val parse_tokens :
+  filename:string ->
+  Preproc_location.t Preproc_token.t list ->
+  (Cerb_frontend.Cabs.translation_unit,
+   Cerb_location.t * Cerb_frontend.Errors.cause)
+  Cerb_frontend.Exception.exceptM
