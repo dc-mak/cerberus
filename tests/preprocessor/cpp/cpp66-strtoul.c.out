@@ -1,0 +1,9 @@
+main() 
+{ 
+long a = (long)(~0U); 
+long b = (long)4294967295ul; 
+if (a < b) { printf("a < b (%x < %x)\n", a, b); } 
+printf("%lx\n", strtoul("4294967295ul", NULL, 0)); 
+printf("%d\n", strtoul("-8", NULL, 0)); 
+printf("%lx\n", strtoul("0xffffffffL", NULL, 0)); 
+} 

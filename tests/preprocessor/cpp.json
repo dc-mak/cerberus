@@ -1,0 +1,6 @@
+{
+  "name": "out",
+  "args": [],
+  "filter": "^(cpp[0-9].*\\.c)$",
+  "timeout": 5
+}
