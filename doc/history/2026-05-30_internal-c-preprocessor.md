@@ -692,8 +692,57 @@ tokens.
 
 ### Progress log
 
-- **C1–C4 done** (commits `(cpp) Add Preproc_location …` through
-  `(cpp) Add reconstruct, cpp_dump and tests`).
+- **C1–C10 done** (commits `(cpp) Add Preproc_location …` through
+  `(cpp) Handle #include and #pragma once`). The standalone engine is complete:
+  object/function-like macros, `#`/`##`, conditionals + `Cpp_eval`,
+  `#include`/`#pragma once`. **40/76 cscout goldens pass**; the rest need cscout
+  whitespace quirks (double-space, trailing-space), absent headers, varargs edge
+  cases, or phase-1/2 (C18).
+- **Integration design revised & approved (see below).** C11–C16 (frontend
+  integration) not yet started.
+
+### Integration revision (approved 2026-05-30)
+
+A review question — *how does the new lexer hook into the existing parser, and how
+is fidelity with `c_lexer` guaranteed?* — led to a hardened integration design.
+Full version: `~/.claude/plans/steady-strolling-dahl.md`. Key points (authoritative
+for C11+):
+
+- **`Preproc_lexer` is NOT a replacement for `c_lexer.mll`.** It makes pp-tokens
+  for the engine; `c_lexer` keeps making `Tokens.token` for Menhir and stays the
+  default (external `cc -E`) path. The internal path is switch-gated only.
+- **The seam is one line:** `pos x = C_lexer.LineMap.position x`
+  (`c_parser.mly:17`). Menhir is monolithic; the token supplier sets
+  `lexbuf.lex_start_p/lex_curr_p` and Menhir reads them as `$startpos/$endpos`.
+  Reuse `handle` + `MenhirLib.ErrorReports.wrap` verbatim; swap only the closure.
+- **Decode by delegation (fidelity is structural).** The feed turns each expanded
+  pp-token into a `Tokens.token` by **re-lexing its spelling through the existing
+  `c_lexer` decoder** — `C_lexer.token_of_string ~inside_cn:false` (C12, exposed
+  from `c_lexer.mll`). No re-implementation of constant/keyword/string decoding.
+  `Magic` → `CERB_MAGIC`; `Newline` dropped; end → `EOF`.
+- **Typedef hack reused, not rebuilt.** Factor the `LSIdentifier` deferral out of
+  `create_lexer` into `C_lexer.defer_typedef : (lexbuf -> token) -> [ `LEXER of
+  lexbuf -> token ]` (preserving the `` `LEXER `` staging tag). Both `create_lexer`
+  and the feed wrap their raw producer with it, over the **unchanged**
+  `Lexer_feedback` global the **unchanged** parser still mutates. `decode_next`
+  (the feed's raw producer) occupies `initial`'s slot but is a different function:
+  it pops a pp-token and decodes its spelling.
+- **Staging preserved.** `Preproc_token_feed.make : … -> t` is a staged
+  constructor (abstract `t`: cursor + side table, fresh per parse);
+  `lexer : t -> [ `LEXER … ]`. No shared mutable state across parses.
+- **Locations.** The feed precomputes a `Cerb_position` (with the C11 `provenance`
+  field) per token endpoint into a side table keyed by a synthetic `pos_cnum`;
+  `LineMap.position` becomes a side-table lookup in internal mode. `region`/`point`
+  and range composition are untouched.
+- **Fidelity gate (C13.5, new + decided):** a token-level differential
+  (external+`c_lexer` vs internal+feed, identical `Tokens.token` streams on a
+  macro-free corpus) **plus** end-to-end elaboration parity (`run-ci.sh`,
+  `bytes/elab.json`) with and without `--sw internal_cpp`, before the switch is
+  trusted.
+- **Decisions:** keep C1–C9; expose the decoder from `c_lexer.mll`; token +
+  end-to-end fidelity gate.
+
+### Earlier progress note (C1–C4)
 
 ### Deviations from the plan
 
