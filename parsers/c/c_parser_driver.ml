@@ -30,8 +30,23 @@ let feed_show_token feed : show_token =
     | Some s -> s
     | None -> ""
 
-let handle parse (token_pos_buffer, lexer) ~(show_token : show_token) lexbuf =
-  let to_pos = C_lexer.LineMap.position in
+(* The parser is allowed to build the tree with *raw* positions (for the feed,
+   side-table keys); [recover] is how each lexer turns those back into resolved
+   positions and offending-token text.  enrich is applied to the tree after
+   parsing (Cabs_location_map) and to error locations here.  The text lexer's
+   positions are already resolved, so its enrich is Fun.id. *)
+type recover =
+  { enrich : Cerb_position.t -> Cerb_position.t
+  ; show_token : show_token }
+
+(* Feed enrich: a position carries its side-table key in its file pos_cnum. *)
+let feed_enrich feed (p : Cerb_position.t) =
+  match Preproc_token_feed.lookup feed (Cerb_position.to_file_lexing p).pos_cnum with
+  | Some resolved -> resolved
+  | None -> p
+
+let handle parse (token_pos_buffer, lexer) ~recover lexbuf =
+  let to_pos x = recover.enrich (C_lexer.LineMap.position x) in
   try Exception.except_return (parse lexer lexbuf) with
   | C_lexer.Error err ->
     let loc = Cerb_location.point (to_pos (Lexing.lexeme_start_p lexbuf)) in
@@ -47,7 +62,7 @@ let handle parse (token_pos_buffer, lexer) ~(show_token : show_token) lexbuf =
     let message = String.sub message 0 (String.length message - 1) in
     let range = (to_pos (Lexing.lexeme_start_p lexbuf), to_pos (Lexing.lexeme_end_p lexbuf)) in
     let loc = Cerb_location.(region range NoCursor) in
-    let where = MenhirLib.ErrorReports.show show_token token_pos_buffer in
+    let where = MenhirLib.ErrorReports.show recover.show_token token_pos_buffer in
     Exception.fail (loc, Errors.CPARSER (Errors.Cparser_unexpected_token  (where ^ "\n" ^ message)))
   | Failure msg ->
     prerr_endline "CPARSER_DRIVER (Failure)";
@@ -98,7 +113,7 @@ let parse_loc_string parse (loc, str) =
   handle
     parse
     (MenhirLib.ErrorReports.wrap cn_lexer)
-    ~show_token:(text_show_token ~offset lexbuf)
+    ~recover:{ enrich = Fun.id; show_token = text_show_token ~offset lexbuf }
     lexbuf
 
 let update_enclosing_region payload_region xs =
@@ -142,10 +157,12 @@ let magic_comments_to_cn_toplevel (Cabs.TUnit decls) =
 
 let parse_with_magic_comments lexbuf =
   let `LEXER c_lexer = C_lexer.create_lexer ~inside_cn:false in
+  (* Text lexer: positions are already resolved, so enrich = Fun.id and no
+     post-parse traversal is needed. *)
   handle
     C_parser.translation_unit
     (MenhirLib.ErrorReports.wrap c_lexer)
-    ~show_token:(text_show_token ~offset:0 lexbuf)
+    ~recover:{ enrich = Fun.id; show_token = text_show_token ~offset:0 lexbuf }
     lexbuf
 
 let parse lexbuf =
@@ -155,23 +172,21 @@ let parse lexbuf =
     magic_comments_to_cn_toplevel
 
 (* Parse a token stream produced by the internal preprocessor.  The feed supplies
-   Tokens.token directly (decoded through c_lexer); its side-table lookup is
-   installed into the location seam so $startpos/$endpos resolve to the original
-   source positions (with macro provenance).  A dummy lexbuf carries the synthetic
-   positions; LineMap is still init'd to [filename] so the magic-comment CN re-lex
-   path (which clears the lookup) reports the right file. *)
+   Tokens.token directly (decoded through c_lexer), giving the parser raw
+   positions whose pos_cnum is a side-table key; after parsing, Cabs_location_map
+   resolves every location through the feed (no global state).  A dummy lexbuf
+   carries the synthetic positions; LineMap is init'd to [filename] for the
+   magic-comment CN re-lex path. *)
 let parse_tokens ~filename expanded =
   C_lexer.LineMap.init filename;
   let feed = Preproc_token_feed.make expanded in
-  C_lexer.LineMap.set_provenance_lookup (Preproc_token_feed.lookup feed);
+  let recover = { enrich = feed_enrich feed; show_token = feed_show_token feed } in
   let `LEXER lexer = Preproc_token_feed.lexer feed in
   let dummy = Lexing.from_string "" in
   Lexing.set_filename dummy filename;
-  let result =
-    handle C_parser.translation_unit (MenhirLib.ErrorReports.wrap lexer)
-      ~show_token:(feed_show_token feed) dummy in
-  C_lexer.LineMap.clear_provenance_lookup ();
-  Exception.except_bind result magic_comments_to_cn_toplevel
+  handle C_parser.translation_unit (MenhirLib.ErrorReports.wrap lexer) ~recover dummy
+  |> fun result -> Exception.except_bind result magic_comments_to_cn_toplevel
+  |> Exception.except_fmap (Cabs_location_map.enrich recover.enrich)
 
 let parse_from_channel input =
   let read f input =

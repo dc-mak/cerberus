@@ -19,6 +19,10 @@ val point: Cerb_position.t -> t
 val region: Cerb_position.t * Cerb_position.t -> cursor -> t
 val regions: (Cerb_position.t * Cerb_position.t) list -> cursor -> t
 
+(* Rewrite every Cerb_position in a location (used to enrich raw parse-tree
+   positions after parsing). *)
+val map_positions: (Cerb_position.t -> Cerb_position.t) -> t -> t
+
 val with_cursor: t -> t (* NOTE: useful when pointing to an expanded macro *)
 val with_cursor_from: t -> t -> t
 val bbox: t list -> [ `Bbox of Cerb_position.t * Cerb_position.t | `Other of t ]

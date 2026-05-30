@@ -37,29 +37,17 @@ module LineMap = struct
   (** Get the current mapping *)
   let get () = !mapping
 
-  (* The internal-cpp token feed gives the parser synthetic Lexing.positions
-     whose pos_cnum keys a side table of precomputed Cerb_positions.  When such a
-     lookup is installed, `position` resolves through it (so columns + macro
-     provenance survive) instead of the gcc-linemarker LineMap.  Installed per
-     parse by the driver; the external cc -E path leaves it None. *)
-  let provenance_lookup : (int -> Cerb_position.t option) option ref = ref None
-  let set_provenance_lookup f = provenance_lookup := Some f
-  let clear_provenance_lookup () = provenance_lookup := None
+  (** Make a position from a Lexing.position, consulting the line map.
 
-  (** Make a position from a Lexing.position, consulting the line map *)
+      On the internal-cpp path this returns a *raw* position: the feed gives
+      synthetic Lexing.positions whose pos_cnum is a side-table key, so the
+      result carries that key (in its file pos_cnum) and the driver resolves it
+      after parsing (Cabs_location_map + feed_enrich).  The external path's
+      positions are real, so this resolves the gcc-linemarker map as before. *)
   let position x =
-    match !provenance_lookup with
-    | Some f ->
-        (match f x.Lexing.pos_cnum with
-         | Some p -> p
-         | None ->
-             let p1 = Cerb_position.from_lexing x in
-             let src_loc = Cerb_position.LineMap.lookup (Cerb_position.line p1) !mapping in
-             Cerb_position.set_source src_loc p1)
-    | None ->
-        let p1 = Cerb_position.from_lexing x in
-        let src_loc = Cerb_position.LineMap.lookup (Cerb_position.line p1) !mapping in
-        Cerb_position.set_source src_loc p1
+    let p1 = Cerb_position.from_lexing x in
+    let src_loc = Cerb_position.LineMap.lookup (Cerb_position.line p1) !mapping in
+    Cerb_position.set_source src_loc p1
 
 end
 

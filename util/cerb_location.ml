@@ -38,6 +38,22 @@ let regions xs cur =
         (* TODO: need to sort the regions *)
         Loc_regions (xs, cur)
 
+(* Rewrite every Cerb_position in a location.  Used to enrich a parse tree's raw
+   positions (e.g. the internal preprocessor's side-table keys) into resolved
+   positions after parsing. *)
+let map_cursor f = function
+  | NoCursor -> NoCursor
+  | PointCursor p -> PointCursor (f p)
+  | RegionCursor (p1, p2) -> RegionCursor (f p1, f p2)
+
+let map_positions f = function
+  | Loc_unknown -> Loc_unknown
+  | Loc_other s -> Loc_other s
+  | Loc_point p -> Loc_point (f p)
+  | Loc_region (p1, p2, c) -> Loc_region (f p1, f p2, map_cursor f c)
+  | Loc_regions (ps, c) ->
+      Loc_regions (List.map (fun (a, b) -> (f a, f b)) ps, map_cursor f c)
+
 let with_cursor = function
   | Loc_unknown
   | Loc_other _
