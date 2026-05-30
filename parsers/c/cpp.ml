@@ -292,17 +292,93 @@ let do_define macros = function
        | Error _ -> macros)
   | _ -> macros
 
-let directive macros = function
-  | d :: rest when is_ident d ->
+let do_undef macros = function
+  | n :: _ when is_ident n -> Macro_table.undef (Preproc_token.spelling n) macros
+  | _ -> macros
+
+(* --- Conditional inclusion (§6.10.1) --------------------------------------- *)
+
+(* One #if/#ifdef/#ifndef group on the conditional stack.  [outer] records
+   whether the enclosing context was emitting (a group nested in a skipped region
+   never activates any branch); [taken] whether some branch has matched; [active]
+   whether the current branch emits (already accounts for [outer]). *)
+type cond = { outer : bool; taken : bool; active : bool }
+
+let emitting = function [] -> true | f :: _ -> f.active
+
+(* Substitute each literal [defined X] / [defined(X)] with 0 or 1 before the line
+   is macro-expanded, so the operand is not itself expanded. *)
+let mk_num present template =
+  Preproc_token.make ~kind:Preproc_token.Pp_number
+    ~spelling:(if present then "1" else "0")
+    ~preceded_by_space:(Preproc_token.preceded_by_space template)
+    ~loc:(Preproc_token.loc template) ()
+
+let rec replace_defined macros = function
+  | d :: rest
+    when is_ident d && String.equal (Preproc_token.spelling d) "defined" ->
+      (match rest with
+       | lp :: n :: rp :: rest'
+         when is_punct "(" lp && is_ident n && is_punct ")" rp ->
+           mk_num (Macro_table.mem (Preproc_token.spelling n) macros) d
+           :: replace_defined macros rest'
+       | n :: rest' when is_ident n ->
+           mk_num (Macro_table.mem (Preproc_token.spelling n) macros) d
+           :: replace_defined macros rest'
+       | _ -> d :: replace_defined macros rest)
+  | t :: rest -> t :: replace_defined macros rest
+  | [] -> []
+
+(* Evaluate a #if / #elif controlling expression: resolve [defined], expand, then
+   hand the result to Cpp_eval.  An ill-formed expression counts as false. *)
+let eval_cond macros toks =
+  let expanded = expand macros (replace_defined macros toks) in
+  match Cpp_eval.eval expanded with Ok b -> b | Error _ -> false
+
+let push_if conds ~outer ~cond =
+  let active = outer && cond in
+  { outer; taken = active; active } :: conds
+
+let do_elif conds eval_branch =
+  match conds with
+  | f :: rest ->
+      if (not f.outer) || f.taken then { f with active = false } :: rest
+      else let b = eval_branch () in { f with active = b; taken = b } :: rest
+  | [] -> conds  (* stray #elif: ignored *)
+
+let do_else conds =
+  match conds with
+  | f :: rest ->
+      let active = f.outer && not f.taken in
+      { f with active; taken = true } :: rest
+  | [] -> conds
+
+let do_endif conds = match conds with _ :: rest -> rest | [] -> []
+
+(* Dispatch one directive, given whether we are currently emitting.  Returns the
+   updated macro table and conditional stack. *)
+let apply_directive macros conds ds =
+  let em = emitting conds in
+  match ds with
+  | [] -> (macros, conds)  (* null directive *)
+  | d :: rest ->
       (match Preproc_token.spelling d with
-       | "define" -> do_define macros rest
-       | "undef" ->
-           (match rest with
-            | n :: _ when is_ident n -> Macro_table.undef (Preproc_token.spelling n) macros
-            | _ -> macros)
-       (* #if / #ifdef / #include / #line / ... handled in later commits *)
-       | _ -> macros)
-  | _ -> macros  (* a null directive: '#' alone on a line *)
+       | "define" -> ((if em then do_define macros rest else macros), conds)
+       | "undef" -> ((if em then do_undef macros rest else macros), conds)
+       | "ifdef" ->
+           let cond =
+             match rest with n :: _ -> Macro_table.mem (Preproc_token.spelling n) macros | _ -> false in
+           (macros, push_if conds ~outer:em ~cond)
+       | "ifndef" ->
+           let cond =
+             match rest with n :: _ -> not (Macro_table.mem (Preproc_token.spelling n) macros) | _ -> false in
+           (macros, push_if conds ~outer:em ~cond)
+       | "if" -> (macros, push_if conds ~outer:em ~cond:(em && eval_cond macros rest))
+       | "elif" -> (macros, do_elif conds (fun () -> eval_cond macros rest))
+       | "else" -> (macros, do_else conds)
+       | "endif" -> (macros, do_endif conds)
+       (* #include / #line / #pragma / #error handled in later commits *)
+       | _ -> (macros, conds))
 
 (* --- Line-oriented driver -------------------------------------------------- *)
 
@@ -316,22 +392,30 @@ let split_lines toks =
   in
   go [] toks
 
-(* Maximal runs of non-directive lines are expanded together (so a function-like
-   invocation may span newlines); a directive line flushes the pending text,
-   then updates the macro environment and emits nothing. *)
+(* Maximal runs of emitting non-directive lines are expanded together (so a
+   function-like invocation may span newlines).  A directive line flushes the
+   pending text, then updates the macro environment / conditional stack and emits
+   nothing.  In a skipped region text lines are dropped, but #if/#endif &c. are
+   still processed so nesting stays balanced. *)
 let run macros lines =
-  let rec go macros pending = function
+  let rec go macros conds pending = function
     | [] -> expand macros (List.concat (List.rev pending))
     | (ltoks, nl) :: rest ->
         (match ltoks with
          | t :: ds when is_punct "#" t ->
-             let flushed = expand macros (List.concat (List.rev pending)) in
-             flushed @ go (directive macros ds) [] rest
+             let flushed =
+               if emitting conds then expand macros (List.concat (List.rev pending))
+               else [] in
+             let macros', conds' = apply_directive macros conds ds in
+             flushed @ go macros' conds' [] rest
          | _ ->
-             let chunk = match nl with Some n -> ltoks @ [ n ] | None -> ltoks in
-             go macros (chunk :: pending) rest)
+             if emitting conds then
+               let chunk = match nl with Some n -> ltoks @ [ n ] | None -> ltoks in
+               go macros conds (chunk :: pending) rest
+             else
+               go macros conds pending rest)
   in
-  go macros [] lines
+  go macros [] [] lines
 
 let preprocess toks =
   let lifted = List.map (Preproc_token.map Preproc_location.of_lexing) toks in
