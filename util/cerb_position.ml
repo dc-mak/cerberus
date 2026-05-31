@@ -43,37 +43,3 @@ let set_source (f,n) pos = { pos with source_file = f; source_line = n }
 
 let provenance pos = pos.provenance
 let with_provenance provenance pos = { pos with provenance }
-
-
-module LineMap = struct
-  module Map = Map.Make(Int)
-
-  type t = {
-    file:   string;               (* pre-processed file *)
-    lines:  (string * int) Map.t 
-    (* The map associates lines in the pre-processed file with
-       declarations about the original source (file, line number).
-       We keep a whole map, rather than just the last locations,
-       to support parsing in mulitple passes.  For example, we first parse
-       CN magic comments as just a literal, and then we parse them fully
-       in a secondary pass. *)
-
-
-  }
-
-  let empty file = { file = file; lines = Map.empty }
-
-  let add k v mp = { mp with lines = Map.add k v mp.lines }
-
-  let lookup k mp =
-    match Map.find_last_opt (fun l -> l < k) mp.lines with
-    | None           -> (mp.file, k)
-    | Some (l,(f,n)) -> (f, n + (k - l - 1))
-
-  let dump mp =
-    Printf.printf "+--- %s\n" mp.file;
-    Map.iter (fun k (f,n) ->
-      Printf.printf "| %d: %s:%d\n" k f n
-    ) mp.lines;
-    Printf.printf "+--------------------\n"
-end

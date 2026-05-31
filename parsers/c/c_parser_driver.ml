@@ -78,7 +78,7 @@ let diagnostic_get_tokens ~inside_cn loc string =
   (* `C_lexer.magic_token' ensures `loc` is a region *)
   let start_pos = Option.get @@ start_pos loc in
   let lexbuf = Lexing.from_string string in
-  let `LEXER lexer, _to_pos = C_lexer.create_lexer ~inside_cn ~enrich:Fun.id in
+  let `LEXER lexer = C_lexer.create_lexer ~inside_cn ~enrich:Fun.id in
   let rec relex (toks, pos) =
     try
       match lexer lexbuf with
@@ -107,12 +107,12 @@ let parse_loc_string parse (loc, str) =
      still needs to be figured out: the magic payload is re-lexed in its own
      coordinate space, and how its positions/enrich should compose with the outer
      translation unit (especially under the internal cpp) is left for later. *)
-  let `LEXER cn_lexer, to_pos = C_lexer.create_lexer ~inside_cn:true ~enrich:Fun.id in
+  let `LEXER cn_lexer = C_lexer.create_lexer ~inside_cn:true ~enrich:Fun.id in
   let offset = (Cerb_position.to_file_lexing start_pos).pos_cnum in
   handle
     parse
     (MenhirLib.ErrorReports.wrap cn_lexer)
-    ~to_pos
+    ~to_pos:Cerb_position.from_lexing
     ~show_token:(text_show_token ~offset lexbuf)
     lexbuf
 
@@ -158,11 +158,11 @@ let magic_comments_to_cn_toplevel (Cabs.TUnit decls) =
 let parse_with_magic_comments lexbuf =
   (* Text lexer: the # line-marker rule sets real positions, so enrich = Fun.id
      and no post-parse traversal is needed. *)
-  let `LEXER c_lexer, to_pos = C_lexer.create_lexer ~inside_cn:false ~enrich:Fun.id in
+  let `LEXER c_lexer = C_lexer.create_lexer ~inside_cn:false ~enrich:Fun.id in
   handle
     C_parser.translation_unit
     (MenhirLib.ErrorReports.wrap c_lexer)
-    ~to_pos
+    ~to_pos:Cerb_position.from_lexing
     ~show_token:(text_show_token ~offset:0 lexbuf)
     lexbuf
 

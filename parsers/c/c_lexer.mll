@@ -204,7 +204,10 @@ let cn_keywords =
   * 'unimplemented' - non-functional, but the keyword is reserved
 
 May raise `Not_found`, indicating `id` is not a recognized CN keyword. *)
-let cn_lex_keyword id start_pos end_pos =
+let cn_lex_keyword ~enrich id start_pos end_pos =
+  let loc =
+    Cerb_location.(region (enrich (Cerb_position.from_lexing start_pos),
+                           enrich (Cerb_position.from_lexing end_pos)) NoCursor) in
   (* Try to lex CN production keywords *)
   match Hashtbl.find cn_keywords id with
   | (Production, kw) -> kw
@@ -212,8 +215,7 @@ let cn_lex_keyword id start_pos end_pos =
     (* Only want to warn once _per CN/Cerberus invocation_ *)
     Hashtbl.replace cn_keywords id (Production, kw);
     prerr_endline
-      (Pp_errors.make_message
-        Cerb_location.(region (Cerb_position.from_lexing start_pos, Cerb_position.from_lexing end_pos) NoCursor)
+      (Pp_errors.make_message loc
         Errors.(CPARSER (Errors.Cparser_experimental_keyword id))
         Warning);
     kw
@@ -221,8 +223,7 @@ let cn_lex_keyword id start_pos end_pos =
     (* Only want to warn once _per CN/Cerberus invocation_ *)
     Hashtbl.replace cn_keywords id (Production, kw);
     prerr_endline
-      (Pp_errors.make_message
-        Cerb_location.(region (Cerb_position.from_lexing start_pos, Cerb_position.from_lexing end_pos) NoCursor)
+      (Pp_errors.make_message loc
         Errors.(CPARSER (Errors.Cparser_deprecated_keyword (id, instead)))
         Warning);
     kw
@@ -248,7 +249,7 @@ let magic_token flags start_pos end_pos chars =
   else if List.nth chars (len - 1) != flags.magic_comment_char then (
     prerr_endline
       (Pp_errors.make_message
-         (Cerb_location.point (Cerb_position.from_lexing end_pos))
+         (Cerb_location.point (flags.enrich (Cerb_position.from_lexing end_pos)))
          Errors.(CPARSER Cparser_mismatched_magic_comment)
          Warning);
     None
@@ -629,7 +630,7 @@ and initial flags = parse
       {
         if flags.inside_cn then
           try
-            cn_lex_keyword id lexbuf.lex_start_p lexbuf.lex_curr_p
+            cn_lex_keyword ~enrich:flags.enrich id lexbuf.lex_start_p lexbuf.lex_curr_p
           with Not_found ->
             UNAME id
         else
@@ -642,7 +643,7 @@ and initial flags = parse
       with Not_found ->
         if flags.inside_cn then
           try
-            cn_lex_keyword id lexbuf.lex_start_p lexbuf.lex_curr_p
+            cn_lex_keyword ~enrich:flags.enrich id lexbuf.lex_start_p lexbuf.lex_curr_p
           with Not_found ->
             LNAME id
         else
@@ -690,15 +691,11 @@ let defer_typedef (raw : lexbuf -> token) : [ `LEXER of lexbuf -> token ] =
         lexer_state := LSRegular;
         if Lexer_feedback.is_typedefname i then TYPE else VARIABLE)
 
-(* Create a lexer over a real lexbuf, plus the [to_pos] it uses to turn the
-   reported Lexing.positions into resolved Cerb_positions for error messages.
-   [enrich] fixes up raw positions (Fun.id for the external text lexer, whose
-   positions are already real; the side-table resolver for the internal feed). *)
-let create_lexer ~(inside_cn:bool) ~enrich
-    : [ `LEXER of lexbuf -> token ] * (Lexing.position -> Cerb_position.t) =
-  let lexer = defer_typedef (fun lexbuf -> initial (lexer_flags ~inside_cn ~enrich) lexbuf) in
-  let to_pos x = enrich (Cerb_position.from_lexing x) in
-  (lexer, to_pos)
+(* [enrich] fixes up the raw positions this lexer reports for error messages
+   (Fun.id for the external text lexer, whose positions are already real; the
+   side-table resolver when reused over the internal feed's positions). *)
+let create_lexer ~(inside_cn:bool) ~enrich : [ `LEXER of lexbuf -> token ] =
+  defer_typedef (fun lexbuf -> initial (lexer_flags ~inside_cn ~enrich) lexbuf)
 
 (* Decode one already-isolated token spelling through the lexer's own
    constant/keyword/string rules, so the internal preprocessor's feed produces

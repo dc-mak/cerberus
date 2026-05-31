@@ -43,29 +43,3 @@ val provenance: t -> macro_frame list
 
 (** Attach a macro-expansion chain to a position (functional update). *)
 val with_provenance: macro_frame list -> t -> t
-
-
-
-module LineMap : sig
-  (** Information about original source locations in a pre-processed file. *)
-  type t
-
-  (** No source location information. The argument is the name of the
-      pre-processed file, which will be used for locations that have no
-      additional information. *)
-  val empty: string -> t
-
-  (** [add line (srouce_file, souce_line) mp] updates [mp] with the
-      information that on line [line] of the pre-processd file there was
-      a declaration that the following lines
-      correspond to [(source_file,souce_line)] *)
-  val add: int -> (string * int) -> t -> t
-
-  (** [lookup line mp] consults [mp] to get source information about [line]
-      in the prepcoessed file.   If there is no additional source information
-      we return a location in the pre-processed file. *)
-  val lookup: int -> t -> (string * int)
-
-  (** Display the line map, for debugging. *)
-  val dump: t -> unit
-end
