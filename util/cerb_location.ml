@@ -426,6 +426,31 @@ let string_at_line fname lnum cpos =
       None
 
 
+(* Clang-style "note: expanded from:" chain for a position carrying internal-cpp
+   macro provenance (outermost-first frames; empty on the external path, so this
+   is a no-op there).  Each note points its caret at the macro body / invocation
+   the token came from. *)
+let provenance_notes pos =
+  let frame_note (frame : Cerb_position.macro_frame) =
+    let (start, _) = frame.Cerb_position.caret in
+    let file = start.Lexing.pos_fname in
+    let lnum = start.Lexing.pos_lnum in
+    let col = start.Lexing.pos_cnum - start.Lexing.pos_bol in (* 0-based *)
+    let descr = match frame.Cerb_position.macro_name with
+      | Some n -> Printf.sprintf " (in expansion of '%s')" n
+      | None -> "" in
+    let note =
+      ansi_format ~err:true [Bold] (Printf.sprintf "%s:%d:%d:" file lnum (col + 1))
+      ^ " note: expanded from:" ^ descr in
+    match string_at_line file lnum (max 0 col) with
+    | Some (_, l) ->
+        "\n" ^ note ^ "\n" ^ l ^ "\n"
+        ^ ansi_format ~err:true [Bold; Green]
+            (String.init (col + 1) (fun n -> if n < col then ' ' else '^'))
+    | None -> "\n" ^ note
+  in
+  String.concat "" (List.map frame_note (Cerb_position.provenance pos))
+
 let head_pos_of_location = function
   | Loc_unknown ->
       ( "unknown location "
@@ -435,7 +460,7 @@ let head_pos_of_location = function
       , "" )
   | Loc_point pos ->
       ( string_of_pos pos
-      , let cpos = Cerb_position.column pos - 1 in
+      , (let cpos = Cerb_position.column pos - 1 in
         match string_at_line (Cerb_position.file pos) (Cerb_position.line pos) cpos with
           | Some (cpos'_opt, l) ->
               let cpos = match cpos'_opt with
@@ -444,10 +469,11 @@ let head_pos_of_location = function
               l ^ "\n" ^
               ansi_format ~err:true [Bold; Green] (String.init (cpos + 1) (fun n -> if n < cpos then ' ' else '^'))
           | None ->
-              "" )
+              "")
+        ^ provenance_notes pos )
   | Loc_region (start_p, end_p, cursor) ->
       ( string_of_pos start_p
-      , let cpos1 = Cerb_position.column start_p - 1 in
+      , (let cpos1 = Cerb_position.column start_p - 1 in
         match string_at_line (Cerb_position.file start_p) (Cerb_position.line start_p) cpos1 with
           | Some (_, l) ->
               let cpos2 =
@@ -467,7 +493,8 @@ let head_pos_of_location = function
                   (fun n -> if n = cursor_n then '^' else if n >= cpos1 && n < cpos2 then '~' else if n < String.length l && l.[n] = '\t' then '\t' else ' ')
               )
           | None ->
-              "" )
+              "")
+        ^ provenance_notes start_p )
   | Loc_regions (xs, cursor) ->
       let pos = match cursor with
         | NoCursor -> fst (List.hd xs)
@@ -475,7 +502,7 @@ let head_pos_of_location = function
         | RegionCursor (p, _) -> p
       in
       ( string_of_pos pos
-      , let cursor_p = Cerb_position.column pos - 1 in
+      , (let cursor_p = Cerb_position.column pos - 1 in
         match string_at_line (Cerb_position.file pos) (Cerb_position.line pos) cursor_p with
         | Some (_, l) ->
           let ps = List.map (fun (s, e) -> (Cerb_position.column s - 1, Cerb_position.column e - 1)) xs in
@@ -485,7 +512,8 @@ let head_pos_of_location = function
                          else if List.exists (fun (p1, p2) -> n >= p1 && n < p2) ps then '~'
                          else ' ')
             )
-        | None -> "" )
+        | None -> "")
+        ^ provenance_notes pos )
 
 
 
