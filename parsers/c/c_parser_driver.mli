@@ -17,7 +17,8 @@ val parse_loc_string :
   ?macros:Cpp.Macro_table.t ->
   ?from_raw_pos:(Cerb_position.t -> Cerb_position.t) ->
   Cerb_location.t * string ->
-  ('a, Cerb_location.t * Cerb_frontend.Errors.cause)
+  ('a * Cpp.Preprocessor.raw_loc_map option,
+   Cerb_location.t * Cerb_frontend.Errors.cause)
   Cerb_frontend.Exception.exceptM
 
 

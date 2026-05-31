@@ -441,7 +441,7 @@ let expansion_notes pos =
       | None -> "" in
     let note =
       ansi_format ~err:true [Bold] (Printf.sprintf "%s:%d:%d:" file lnum (col + 1))
-      ^ " note: expanded from macoro " ^ descr in
+      ^ " note: expanded from macro " ^ descr in
     match string_at_line file lnum (max 0 col) with
     | Some (_, l) ->
         "\n" ^ note ^ "\n" ^ l ^ "\n"

@@ -38,6 +38,7 @@ cpp_only=(
   0004-macro-macro-arg-parse-error.error.c  # arg is a macro expanding to a parse error
   0005-magic-comment-macro.error.c          # object-like macro expanded in a CN magic comment
   0006-magic-comment-macro-arg.error.c      # function-like macro expanded in a CN magic comment
+  0007-magic-comment-macro-chain.error.c    # macro-expansion chain on a CN parse error
 )
 
 function doSkip {

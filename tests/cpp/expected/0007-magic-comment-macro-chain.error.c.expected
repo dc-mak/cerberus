@@ -1,0 +1,7 @@
+cpp/0007-magic-comment-macro-chain.error.c:3:29: error: unexpected token after 'requires' and before ')'
+parsing "cn_fun_spec": seen "CN_SPEC UNAME VARIABLE LPAREN cn_args RPAREN SEMICOLON CN_REQUIRES", expecting "nonempty_list(condition) CN_ENSURES nonempty_list(condition)"
+/*@ spec f(i32 x); requires TOK ; @*/
+                            ^ 
+cpp/0007-magic-comment-macro-chain.error.c:1:13: note: expanded from macoro 'TOK'
+#define TOK )
+            ^

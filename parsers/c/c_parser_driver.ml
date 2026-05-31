@@ -129,34 +129,24 @@ let shift_innermost_caret offset pos =
    (accurate pos_cnum/lnum/fname, synthetic pos_bol key), and the [dummy] lexbuf
    carries the resulting positions to Menhir as $startpos/$endpos.
 
-   [eager] selects how those positions are resolved.  The top-level path is lazy:
-   raw (key-bearing) positions ride into the AST and a single post-pass
-   ([Cabs_location_map.from_raw]) resolves them and attaches expansion chains.
-   The magic-comment fragment path is eager (no such post-pass descends into CN
-   subtrees): the supplier writes already-resolved positions onto [dummy], so CN
-   nodes get correct columns immediately — at the cost of "expanded from:" notes
-   inside CN (lex errors keep theirs via [Error_in_expansion]).
+   Positions ride into the AST raw (key-bearing) and are resolved by a single
+   post-pass over the result ([Cabs_location_map.from_raw]), which is also what
+   attaches the macro-expansion chains.  This holds for the magic-comment fragment
+   too: its CN tree is resolved against the fragment's own map by the caller (see
+   [parse_loc_string]).  Error positions are resolved here via [to_pos].
 
    The deferral fires a TYPE/VARIABLE marker without consuming input, so on those
    pulls the head token is left pending and the marker inherits the name's
    position (the dummy lexbuf is left untouched).
 
-   TODO: still excessively complicated — the dual-lexbuf juggling, the
-   TYPE/VARIABLE un-pop, and the bespoke error resolution should be simplified
-   once the design has settled. *)
-let feed_parse ~filename ~inside_cn ~eager ~parse (tokens, map) =
+   TODO: still excessively complicated — the dual-lexbuf juggling and the
+   TYPE/VARIABLE un-pop should be simplified once the design has settled. *)
+let feed_parse ~filename ~inside_cn ~parse (tokens, map) =
   let from_raw_pos p = from_raw map (Cerb_position.to_file_lexing p) in
-  let resolve p = Cerb_position.to_file_lexing (from_raw map p) in
-  let finish p = if eager then resolve p else p in
-  let to_pos lp = if eager then Cerb_position.from_lexing lp else from_raw map lp in
+  let to_pos lp = from_raw map lp in
   let dummy = Lexing.from_string "" in
   Lexing.set_filename dummy filename;
   let rest = ref tokens in
-  (* Recover an offending token's spelling for error messages by its (file,
-     pos_cnum) — stable whether positions are raw or resolved, since [finish]
-     only rewrites pos_bol.  (Keying [show_token] on pos_bol would miss in eager
-     mode, where the key has been swapped for the real line start.) *)
-  let spellings : (string * int, string) Hashtbl.t = Hashtbl.create 64 in
   let `LEXER lexer = C_lexer.create_lexer ~inside_cn ~from_raw:from_raw_pos () in
   (* The head pp-token (Newlines skipped), not yet consumed. *)
   let rec head () =
@@ -200,9 +190,8 @@ let feed_parse ~filename ~inside_cn ~eager ~parse (tokens, map) =
              raise (Error_in_expansion (err, pos))
          | _ ->
              (* Ordinary token: the bad character's real position is accurate. *)
-             let p = finish inner.Lexing.lex_start_p in
-             dummy.Lexing.lex_start_p <- p;
-             dummy.Lexing.lex_curr_p  <- p;
+             dummy.Lexing.lex_start_p <- inner.Lexing.lex_start_p;
+             dummy.Lexing.lex_curr_p  <- inner.Lexing.lex_start_p;
              raise ex)
     in
     (match t with
@@ -212,20 +201,13 @@ let feed_parse ~filename ~inside_cn ~eager ~parse (tokens, map) =
          ()
      | _ ->
          (match h with Some _ -> rest := List.tl !rest | None -> ());
-         let raw = inner.Lexing.lex_start_p in
-         let p = finish raw in
-         (match Cpp.Preprocessor.lookup map raw.Lexing.pos_bol with
-          | Some e ->
-              Hashtbl.replace spellings (p.Lexing.pos_fname, p.Lexing.pos_cnum)
-                e.Cpp.Preprocessor.lexeme
-          | None -> ());
-         dummy.Lexing.lex_start_p <- p;
-         dummy.Lexing.lex_curr_p  <- finish inner.Lexing.lex_curr_p);
+         dummy.Lexing.lex_start_p <- inner.Lexing.lex_start_p;
+         dummy.Lexing.lex_curr_p  <- inner.Lexing.lex_curr_p);
     t
   in
   let show_token (start, _) =
-    match Hashtbl.find_opt spellings (start.Lexing.pos_fname, start.Lexing.pos_cnum) with
-    | Some s -> s
+    match Cpp.Preprocessor.lookup map start.Lexing.pos_bol with
+    | Some e -> e.Cpp.Preprocessor.lexeme
     | None -> ""
   in
   handle parse (MenhirLib.ErrorReports.wrap supplier) ~to_pos ~show_token dummy
@@ -237,32 +219,39 @@ let feed_parse ~filename ~inside_cn ~eager ~parse (tokens, map) =
    comment), then feed the located tokens through [feed_parse] (eager), exactly as
    the main translation unit is fed.  [start_pos] must already be the payload's
    resolved real start so columns come out right. *)
+(* Re-parse a magic comment's CN payload.  Returns the parse result paired with
+   the fragment's [raw_loc_map] when one was used, so the caller can resolve the
+   CN tree's (key-bearing) positions against it — see [magic_comments_to_cn_toplevel].
+
+   [macros = None] (external cpp, or the internal path with no macros captured)
+   keeps the original text path: a real lexbuf over [str] + a fresh [create_lexer];
+   its positions are already real, so no map is returned.  [macros = Some m] is the
+   internal path: lex and macro-expand the payload with [m] (the table in scope at
+   the comment), then feed the located tokens through [feed_parse], returning the
+   fragment map for the caller to resolve with.  [from_raw_pos] resolves the magic
+   loc's raw start so the payload lexbuf begins with the right pos_bol/column. *)
 let parse_loc_string parse ~inside_cn ?macros ?(from_raw_pos = Fun.id) (loc, str) =
-  (* [from_raw_pos] resolves the magic loc's raw (key-bearing) start to its real
-     source position, so the payload lexbuf starts with the right pos_bol/column.
-     Identity on the external path (positions are already real). *)
   let start_pos = from_raw_pos (Option.get @@ start_pos loc) in
   let filename = Option.value ~default:"<none>" (Cerb_location.get_filename loc) in
-  match macros with
-  | Some macros ->
-      let lexbuf = Lexing.from_string str in
-      Lexing.set_position lexbuf (Cerb_position.to_file_lexing start_pos);
-      Lexing.set_filename lexbuf filename;
-      let toks, map = Cpp.Preprocessor.expand_fragment macros lexbuf in
-      feed_parse ~filename ~inside_cn ~eager:true ~parse (toks, map)
-  | None ->
   let lexbuf = Lexing.from_string str in
   (* `C_lexer.magic_token' ensures `loc` is a region *)
   Lexing.set_position lexbuf (Cerb_position.to_file_lexing start_pos);
   Lexing.set_filename lexbuf filename;
-  let `LEXER cn_lexer = C_lexer.create_lexer ~inside_cn () in
-  let offset = (Cerb_position.to_file_lexing start_pos).pos_cnum in
-  handle
-    parse
-    (MenhirLib.ErrorReports.wrap cn_lexer)
-    ~to_pos:Cerb_position.from_lexing
-    ~show_token:(text_show_token ~offset lexbuf)
-    lexbuf
+  match macros with
+  | Some macros ->
+      let toks, map = Cpp.Preprocessor.expand_fragment macros lexbuf in
+      feed_parse ~filename ~inside_cn ~parse (toks, map)
+      |> Exception.except_fmap (fun r -> (r, Some map))
+  | None ->
+      let `LEXER cn_lexer = C_lexer.create_lexer ~inside_cn () in
+      let offset = (Cerb_position.to_file_lexing start_pos).pos_cnum in
+      handle
+        parse
+        (MenhirLib.ErrorReports.wrap cn_lexer)
+        ~to_pos:Cerb_position.from_lexing
+        ~show_token:(text_show_token ~offset lexbuf)
+        lexbuf
+      |> Exception.except_fmap (fun r -> (r, None))
 
 let update_enclosing_region payload_region xs =
   let slash_inclusive_region = match payload_region with
@@ -314,7 +303,26 @@ let magic_comments_to_cn_toplevel ?macro_defns ?from_raw_pos (Cabs.TUnit decls) 
     | Cabs.EDecl_magic (loc, str) ->
       parse_loc_string C_parser.cn_toplevel ~inside_cn:true
         ?macros:(macros_of loc) ?from_raw_pos (loc, str)
-      |> Exception.except_fmap (update_enclosing_region loc)
+      |> Exception.except_fmap (fun (decls, map_opt) ->
+           (* The fragment's CN tree carries the *fragment* map's keys, which the
+              outer post-pass (a different map) can't resolve.  Resolve them here,
+              against that map — this is where the magic-expansion chains inside CN
+              get attached — with [~traverse_cn:true] (the outer pass then leaves
+              the now-resolved CN alone). *)
+           let decls = match map_opt with
+             | None -> decls
+             | Some fmap ->
+                 let resolve p = from_raw fmap (Cerb_position.to_file_lexing p) in
+                 let (Cabs.TUnit ds) =
+                   Cabs_location_map.from_raw ~traverse_cn:true resolve (Cabs.TUnit decls) in
+                 ds in
+           (* The enclosing region is built from [loc] (the magic comment's own
+              location, still key-bearing); resolve it too, since the outer pass
+              will skip these CN nodes. *)
+           let loc = match from_raw_pos with
+             | Some f -> Cerb_location.map_positions f loc
+             | None -> loc in
+           update_enclosing_region loc decls)
     | decl ->
       Exception.except_return [decl] in
   decls
@@ -344,7 +352,7 @@ let parse lexbuf =
    magic comments are then re-parsed (with their captured macro tables). *)
 let parse_tokens ~filename (tokens, map, macro_defns) =
   let from_raw_pos p = from_raw map (Cerb_position.to_file_lexing p) in
-  feed_parse ~filename ~inside_cn:false ~eager:false
+  feed_parse ~filename ~inside_cn:false
     ~parse:C_parser.translation_unit (tokens, map)
   |> fun result ->
      Exception.except_bind result

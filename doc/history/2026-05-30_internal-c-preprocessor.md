@@ -888,69 +888,59 @@ verified against `run-cpp.sh`. `Cpp.Lexer` must tokenise CN payloads acceptably
   threaded functionally through `process_lines`/`do_include` like `once`, then
   re-keyed by synthetic key in `assign_keys`). New `expand_fragment`.
 - `c_parser_driver`: `parse_tokens` refactored into a shared `feed_parse` core
-  (params `~inside_cn ~eager ~parse`); top-level is lazy + `TUnit` post-pass, the
-  fragment is eager. `parse_loc_string` gained `?macros ?from_raw_pos`;
-  `magic_comments_to_cn_toplevel` gained `?macro_defns ?from_raw_pos` and looks up
-  the in-scope table by the magic loc's `pos_bol`. `feed_parse`'s `show_token` now
-  keys spellings by `(file, pos_cnum)` (stable under eager resolution) so CN error
-  messages keep their "after 'X' before 'Y'" lexemes.
+  (params `~inside_cn ~parse`; always lazy — raw positions ride into the AST and a
+  post-pass resolves them). `parse_loc_string` gained `?macros ?from_raw_pos` and
+  returns the fragment's `raw_loc_map` (when one was used);
+  `magic_comments_to_cn_toplevel` gained `?macro_defns ?from_raw_pos`, looks up the
+  in-scope table by the magic loc's `pos_bol`, and resolves the re-parsed CN tree
+  against the fragment map (see the CN-chains note below).
 - Verified: a macro used in a top-level `/*@ spec … @*/` expands (internal errors
   show the *expanded* tokens / parse states; external show the literal), with
-  source-accurate carets.  `tests/cpp/0005` (object-like) and `0006` (function-
-  like) cover it; `run-cpp.sh` runs the cpp-only group with `at_magic_comments`.
-  Status: `run-ci.sh` 188/0, `run-cpp.sh` 194/0, cscout 44/76.
-- Known limitation (accepted): no "expanded from:" notes *inside* CN diagnostics
-  (eager resolution drops the chain; lex errors keep theirs via
-  `Error_in_expansion`).  Statement/loop/call-site magic still unexpanded.
+  source-accurate carets.  `tests/cpp/0005` (object-like), `0006` (function-like),
+  `0007` (macro-expansion chain on a CN parse error) cover it; `run-cpp.sh` runs
+  the cpp-only group with `at_magic_comments`.
+  Status: `run-ci.sh` 188/0, `run-cpp.sh` 195/0, cscout 44/76.
+- Remaining limitation: statement/loop/call-site magic comments are still
+  unexpanded (they re-parse later in `Cabs_to_ail`, which has no `macro_defns`).
 
-#### Two implementation notes (both stem from Menhir's flat `Lexing.position`)
+#### Macro chains inside CN diagnostics (2026-05-31)
 
-**The `feed_parse` `spellings` table.** Menhir error messages ("unexpected token
-after 'X' and before 'Y'") get the X/Y lexemes from `MenhirLib.ErrorReports.wrap`,
-which records each token's `(start, end)` positions and later calls our
-`show_token (start, _)` to turn a position back into source text.  On the text
-path that is a buffer slice (`text_show_token`), but `feed_parse` drives Menhir
-against an *empty* `dummy` lexbuf — there is no buffer — so `show_token` needs a
-position→spelling side lookup.  The original lookup keyed `raw_loc_map` by
-`start.pos_bol`, which works in **lazy** mode (the dummy carries the raw position,
-whose `pos_bol` *is* the synthetic key) but **fails in eager mode**: the fragment
-supplier writes resolved positions, so `pos_bol` has been swapped for the real line
-start and the key-lookup misses (→ "after '' and before ''").  Fix: `finish` only
-ever rewrites `pos_bol`, never `pos_cnum`, so `(pos_fname, pos_cnum)` is identical
-raw or resolved.  `spellings : (string * int, string) Hashtbl` is keyed on that
-pair, populated by the supplier as it emits each real token (it still holds the raw
-key there, so it fetches the lexeme from `raw_loc_map`), and read by `show_token` —
-uniform across both modes.  It is *local* mutable state inside one `feed_parse`
-call (same category as the `rest` ref and the `dummy` mutation), not threaded
-across modules/stages.
+The "expanded from:" notes live in the `expansions` list on a `Cerb_position.t`,
+but Menhir hands semantic actions only a flat `Lexing.position`, which can't hold
+that list.  The main path copes by *defer-and-recover*: the synthetic `pos_bol`
+key rides through the parser inside the `Lexing.position`, then one post-pass
+(`Cabs_location_map.from_raw`) walks the AST and rebuilds each position into a
+`Cerb_position.t` *with* its chain.
 
-**Why CN diagnostics inside a magic comment carry no macro chain.** The
-"expanded from:" notes live in the `expansions` list on a `Cerb_position.t`, but
-Menhir hands semantic actions only a flat `Lexing.position`, which has nowhere to
-hold that list.  The main path copes by *defer-and-recover*: the synthetic
-`pos_bol` key rides through the parser inside the `Lexing.position`, and a single
-post-pass (`Cabs_location_map.from_raw`) walks the AST and rebuilds each position
-into a `Cerb_position.t` *with* its chain.  The fragment can't use that pass —
-`from_raw` takes a `TUnit` and **deliberately skips CN subtrees** (a CN-aware
-traversal would be its own project), and `cn_toplevel` returns CN decls, not a
-`TUnit`.  So the fragment resolves **eagerly** instead: the supplier itself does
-`to_file_lexing (from_raw map p)` and writes a *plain `Lexing.position`* — correct
-columns, but the chain `from_raw` computed is discarded at that flat-position
-bottleneck.  Hence parser errors and resolved CN AST nodes get accurate
-file:line:column but no notes.  The one exception is a **lex** error inside an
-expansion: it never goes through that bottleneck — the supplier catches it and
-raises `Error_in_expansion (err, pos)` with a full `Cerb_position.t` (built by
-`from_raw` + `shift_innermost_caret`), so its chain survives.  Getting chains
-everywhere would need either lazy resolution plus a CN-aware position post-pass, or
-a position type richer than `Lexing.position` through Menhir (which its API
-forecloses).
+The first C17 cut couldn't apply that to the magic-comment fragment — `from_raw`
+skipped CN subtrees — so it resolved the fragment **eagerly** (writing flat
+`Lexing.position`s straight onto the dummy), getting correct columns but dropping
+the chain inside CN.  That is now fixed:
+
+- `Cabs_location_map.from_raw` gained a `?traverse_cn` flag and a structural
+  traversal of the (generated) `Cn` types, reusing the existing `ident`/`type_name`
+  rewriters for the `'a`/`'ty` parameters.
+- The fragment feed is now plain **lazy** (the `~eager` param and the
+  `(file,pos_cnum)`-keyed `spellings` table that propped up eager mode are gone;
+  `show_token` is back to the `pos_bol` lookup).  `parse_loc_string` returns the
+  fragment's `raw_loc_map`, and `magic_comments_to_cn_toplevel` resolves the CN
+  decls against *that* map with `~traverse_cn:true` — which is where the chains get
+  attached.
+- The outer TU post-pass keeps `~traverse_cn:false` (the default): the fragment is
+  already fully resolved, and re-applying the *outer* map would be wrong — a
+  resolved real `pos_bol` can collide with an outer synthetic key.  Because the
+  outer pass then leaves CN alone, the magic comment's own `loc` (used to build the
+  enclosing-region `magic_loc` fields) is resolved explicitly before
+  `update_enclosing_region`.
+
+Both lex and parser errors inside a `/*@ … @*/` now carry the chain
+(`tests/cpp/0007`).
 
 - **Remaining after C17:** C18 (trigraphs + backslash-newline splicing, phases 1–2
   pre-pass; unblocks `cpp01-trigtest` and the remaining cscout goldens); statement/
   loop/call-site magic-comment expansion (needs `macro_defns` threaded into
-  `Cabs_to_ail`); “expanded from:” notes *inside* CN (needs a CN-aware position
-  traversal or lazy resolution for the fragment). Lower priority: honour
-  `conf.cpp_save` on the internal path; simplify `parse_tokens`.
+  `Cabs_to_ail`). Lower priority: honour `conf.cpp_save` on the internal path;
+  simplify `parse_tokens`.
 
 ### Integration revision (approved 2026-05-30)
 
