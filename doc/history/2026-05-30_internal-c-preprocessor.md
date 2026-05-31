@@ -755,8 +755,72 @@ tokens.
     driver/seam; (3) honour `conf.cpp_save` on the internal path; (4) 0339's
     inner-char column for invalid-string lex errors.
 
-- **Remaining:** C15 (render "expanded from:" notes), C17 (macros in magic
-  comments), C18 (trigraphs/line splicing).
+- **Wrapped `cpp` library + `raw_loc_map` redesign (2026-05-31):** the standalone
+  `Preproc_*` modules were moved into a self-contained, *wrapped* dune library
+  `cpp` (stdlib-only), so they namespace as `Cpp.Location`, `Cpp.Token`,
+  `Cpp.Lexer`, `Cpp.Macro_table`, `Cpp.Eval`, `Cpp.Output`, `Cpp.Preprocessor`.
+  The parser seam was simplified in several ways the earlier plan did not foresee:
+  - **One map, returned by the engine.** `Preproc_token_feed` is **deleted**.
+    `Cpp.Preprocessor.preprocess` now returns `Location.t Token.t list *
+    raw_loc_map`: an *opaque, lookup-only* side table (`Preprocessor.lookup`)
+    keyed by a **synthetic `pos_bol` counter** (unique per non-Newline token, *not*
+    an accurate bol). `pos_fname`/`pos_lnum`/`pos_cnum` on each token stay accurate,
+    so raw tokens are debuggable; the entry holds the *real* `pos_bol`, the
+    macro-expansion chain (`expansions`), and the lexeme. `from_raw map p` swaps the
+    key back for the real bol (fixing the column) and attaches the chain.
+  - **One lexer instance feeds the parser.** `token_of_string`/`token_of_lexbuf`
+    are gone; `C_lexer.create_lexer ~inside_cn ?from_raw ()` (optional `from_raw`,
+    `unit` last) is the *single* way to build a lexer on both paths. In
+    `C_parser_driver.parse_tokens` a **single** `create_lexer` instance lexes the
+    whole stream (so the typedef-deferral TYPE/VARIABLE markers carry across
+    tokens); each pull feeds it a fresh per-token lexbuf holding that token's
+    lexeme, positioned at its real source start.
+  - **Renames:** `enrich`/`enrichment` → `from_raw`/`raw_loc_map`;
+    `Cerb_position` `provenance`/`macro_frame` → `expansions`/`macro_use`;
+    `Cpp.Location` `macro_frame` → `frame`, `provenance` → `expansions`.
+
+- **C15 done (`bc2724901`):** `Cerb_location.expansion_notes` reads
+  `Cerb_position.expansions` and renders the Clang-style `note: expanded from
+  macoro 'NAME'` caret chain off a location's start position; the primary caret is
+  the outermost macro use. Verified on `tests/cpp/0001`/`0003` and obj-macro chains.
+
+- **C16 inner-char fix (`14debfa0e`) — 0339 gap closed.** The "known minor gap"
+  above (invalid-string lex error landing on the literal's start, not the inner
+  bad char) is **resolved**:
+  - *Non-macro tokens* report the real `inner.lex_start_p` (the single-lexer re-lex
+    now positions the per-token lexbuf at the literal's real source start, so the
+    bad char's `pos_cnum` is accurate). `0339` now carets the `\e` at `2:6`.
+  - *Macro-body tokens* (e.g. `cpp/0003`, where the bad char lives in a macro body
+    that is not spelled at the use site) use a new
+    `C_parser_driver.Error_in_expansion of Errors.cparser_cause * Cerb_position.t`:
+    the supplier resolves the position itself and `shift_innermost_caret`s the
+    innermost "expanded from:" note onto the actual bad character, keeping the
+    primary caret at the use site. `handle` turns the exception into a CPARSER
+    failure directly (no dummy-lexbuf re-resolution).
+  - Dead code from the abandoned arg-frame model removed (`rebase_arg`,
+    `Location.wrap_expansion`).
+
+- **`tests/cpp` corpus + `run-cpp.sh` (2026-05-31):** `tests/run-cpp.sh` drives
+  the shared `ci` corpus through `--switches internal_cpp` (compared to the same
+  `ci/expected` oracle), then four **cpp-only** macro tests in `tests/cpp/`
+  (`tests/cpp/expected`) that exercise lex/parse errors inside macro arguments and
+  nested-macro arguments — caret/notes cases the external `cc -E` path cannot
+  reproduce. **Status: `run-ci.sh` 188/0 (external default), `run-cpp.sh` 192/0
+  (internal), cscout oracle 44/76.**
+
+- **Known: `parse_tokens` is over-complicated.** The single-lexer feed juggles two
+  lexbufs (a per-token `inner` plus a `dummy` that carries positions to Menhir),
+  does a TYPE/VARIABLE marker un-pop, and resolves errors bespoke. A `TODO` on the
+  function records that it should be simplified later (a good moment for the
+  deferred Menhir-incremental-API investigation).
+
+- **Remaining:** C17 (expand macros in magic comments — explicitly deferred until
+  parity + the map were settled, which they now are; this also needs the
+  `parse_loc_string` / `magic_comments_to_cn_toplevel` CN re-parse story figured
+  out under the internal-cpp coordinate scheme) and C18 (trigraphs + backslash-
+  newline splicing, phases 1–2 pre-pass; unblocks `cpp01-trigtest` and the
+  remaining cscout goldens). Lower priority: honour `conf.cpp_save` on the internal
+  path; simplify `parse_tokens`; lazy/eager position-mapping switch.
 
 ### Integration revision (approved 2026-05-30)
 
