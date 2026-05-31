@@ -219,7 +219,9 @@ let rec subst macros ~name ~invoked_at assoc is hs os =
        | actual ->
            subst macros ~name ~invoked_at assoc (h :: is') hs (os @ actual))
   (* T  a parameter: substitute the *expanded* actual, whose first token takes
-     the parameter's spacing *)
+     the parameter's spacing.  Argument tokens keep their own spelling (the call
+     site) and their own expansion chain — they are NOT "expanded from" this
+     macro, so no frame for it is added here. *)
   | t :: is' when is_param assoc t ->
       let actual = Option.value (actual_of assoc t) ~default:[] in
       let sub = set_first_space (Token.preceded_by_space t) (expand macros actual) in
@@ -515,13 +517,71 @@ let rec seed_undefs macros = function
   | [] -> macros
   | name :: rest -> seed_undefs (Macro_table.undef name macros) rest
 
+type entry =
+  { actual_pos_bol : int
+  ; expansions     : Location.frame list
+  ; lexeme         : string
+  }
+
+(* The raw_loc_map is a hash table keyed by the synthetic [pos_bol].  Abstract in
+   the .mli, so callers can only [lookup]. *)
+type raw_loc_map = (int, entry) Hashtbl.t
+
+let lookup map key = Hashtbl.find_opt map key
+
+(* The "expanded from:" notes a diagnostic shows for a token, Clang-style.  The
+   primary caret already sits at the outermost invocation (Location.primary), so
+   each frame contributes one note "expanded from macro 'NAME'" whose caret
+   points at the *next* level in: the next frame's invocation site, or — for the
+   innermost frame — the token's own lexeme in the macro body.  Ordinary
+   (unexpanded) tokens get no notes. *)
+let expansion_notes loc =
+  let lex_pos = Location.lexeme loc in
+  let rec go = function
+    | [] -> []
+    | [ (f : Location.frame) ] ->
+        [ Location.{ macro_name = f.macro_name; use = lex_pos } ]
+    | f :: (g :: _ as rest) ->
+        Location.{ macro_name = f.macro_name; use = g.Location.use } :: go rest
+  in
+  go (Location.expansion loc)
+
+(* Assign synthetic [pos_bol] keys to non-Newline tokens and build the
+   raw_loc_map.  Each key is a counter value (unique across the stream).  The
+   real [pos_bol] goes into the entry; [pos_fname], [pos_lnum], and [pos_cnum]
+   stay accurate in the token's position, so the raw token is useful for
+   debugging even without the map. *)
+let assign_keys toks =
+  let map : raw_loc_map = Hashtbl.create 256 in
+  let counter = ref 0 in
+  let keyed = List.map (fun tok ->
+    match Token.kind tok with
+    | Token.Newline -> tok
+    | _ ->
+        let key = !counter in
+        counter := key + 1;
+        let s, e = Location.primary (Token.loc tok) in
+        Hashtbl.replace map key
+          { actual_pos_bol = s.Lexing.pos_bol
+          ; expansions     = expansion_notes (Token.loc tok)
+          ; lexeme         = Token.lexeme tok };
+        (* Give the token a plain (unexpanded) location at its primary caret with
+           the synthetic key in pos_bol — pos_fname/pos_lnum/pos_cnum stay
+           accurate.  The expansion chain is already captured in the map entry, so
+           the rewritten location carries no frames: its primary is exactly this
+           caret, which is what the parser driver positions the lexer at. *)
+        let s' = { s with Lexing.pos_bol = key } in
+        Token.map (fun _ -> Location.of_lexing (s', e)) tok
+  ) toks in
+  (keyed, map)
+
 let preprocess ~include_dirs ~predefined ~undefs ~forced_includes ~filename =
   let macros0 = seed_undefs (seed_defines Macro_table.empty predefined) undefs in
   (* Forced includes (e.g. builtins.h) are processed before the main file, as if
      textually included at the top: their output is prepended and their macros
      thread into the main file. *)
   let rec go macros once acc = function
-    | [] -> List.concat (List.rev acc)
+    | [] -> assign_keys (List.concat (List.rev acc))
     | f :: fs ->
         let lines = split_lines (lex_file f) in
         let out_acc, macros, once =

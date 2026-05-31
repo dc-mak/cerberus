@@ -24,8 +24,18 @@ fail=0
 # run-ci.sh but differ here).  Keep this list short and annotated; it is the
 # honest record of where the in-tree preprocessor is not yet byte-identical.
 cpp_skip=(
-  0339-invalid-string-character.error.c # lex error reported at the literal's
-                                        # start column, not the inner bad char
+)
+
+# Tests that ONLY make sense under the internal preprocessor: they check the
+# macro-expansion carets/columns and "expanded from:" notes, which the external
+# `cc -E` path cannot reproduce (it collapses an expansion to the macro-call
+# site).  They live in their own tests/cpp directory (with tests/cpp/expected),
+# so run-ci.sh never sees them; the .expected files capture the internal output.
+cpp_only=(
+  0001-macro-arg-token-error.error.c        # invalid string char in a macro argument
+  0002-macro-arg-parse-error.error.c        # parse error in a macro argument
+  0003-macro-macro-arg-token-error.error.c  # arg is a macro expanding to a bad string
+  0004-macro-macro-arg-parse-error.error.c  # arg is a macro expanding to a parse error
 )
 
 function doSkip {
@@ -66,33 +76,32 @@ function report {
 
 if [[ $# == 1 ]]; then
   citests=($(basename $1))
+  cpp_only=()
 fi
 
-
-# Setup CERB and CERB_INSTALL_PREFIX (see common.sh)
-set_cerberus_exec "cerberus"
-
-# Running ci tests through the internal preprocessor
-for file in "${citests[@]}"
-do
-  if [ ! -f ./ci/$file ]; then
+# Run one test under --switches internal_cpp and compare to its .expected.
+# $1: the directory holding the test (ci or cpp); $2: the test file name.
+function run_test {
+  dir=$1
+  file=$2
+  if [ ! -f ./$dir/$file ]; then
     echo -e "Test $file: \033[1m\033[33mNOT FOUND\033[0m";
     fail=$((fail+1));
-    continue
+    return
   fi
 
   if doSkip $file; then
     echo -e "Test $file: \033[1m\033[33mSKIPPING\033[0m";
-    continue
+    return
   fi
 
   if [[ $file == *.syntax-only.c ]]; then
-    $CERB --switches internal_cpp --nolibc --typecheck-core ci/$file > tmp/result 2> tmp/stderr
+    $CERB --switches internal_cpp --nolibc --typecheck-core $dir/$file > tmp/result 2> tmp/stderr
   else
-    $CERB --switches internal_cpp --nolibc --typecheck-core --exec --batch ci/$file 1> tmp/result 2> tmp/stderr
+    $CERB --switches internal_cpp --nolibc --typecheck-core --exec --batch $dir/$file 1> tmp/result 2> tmp/stderr
   fi
   ret=$?;
-  if [ -f ./ci/expected/$file.expected ]; then
+  if [ -f ./$dir/expected/$file.expected ]; then
     if [[ $file == *.error.c || $file == *.syntax-only.c ]]; then
       # removing the last line from stderr (the time stats)
       if [ "$(uname)" == "Linux" ]; then
@@ -100,11 +109,11 @@ do
       else # otherwise we assume this is macOS or BSD
           sed -i '' -e '$ d' tmp/stderr
       fi;
-      if ! cmp --silent "tmp/stderr" "ci/expected/$file.expected"; then
+      if ! cmp --silent "tmp/stderr" "$dir/expected/$file.expected"; then
         ret=0;
       fi
     else
-      if ! cmp --silent "tmp/result" "ci/expected/$file.expected"; then
+      if ! cmp --silent "tmp/result" "$dir/expected/$file.expected"; then
         if [[ $file == *.undef.c ]]; then
           ret=0;
         else
@@ -114,9 +123,22 @@ do
     fi
   else
     echo -e "Test $file: \033[1m\033[33mMISSING .expected FILE\033[0m";
-    continue
+    return
   fi
   report $file $ret
+}
+
+# Setup CERB and CERB_INSTALL_PREFIX (see common.sh)
+set_cerberus_exec "cerberus"
+
+# Running the shared ci corpus, then the internal-cpp-only macro tests
+for file in "${citests[@]}"
+do
+  run_test ci $file
+done
+for file in "${cpp_only[@]}"
+do
+  run_test cpp $file
 done
 echo "CPP PASSED: $pass"
 echo "CPP FAILED: $fail"

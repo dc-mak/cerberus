@@ -1,10 +1,10 @@
-(* Eager post-parse location enrichment.
+(* Eager post-parse location resolution.
 
    Rewrite every source location in a Cabs translation unit by applying [f] to
    each Cerb_position.  The internal preprocessor produces a parse tree whose
-   positions are side-table keys (see Preproc_token_feed); this turns them into
-   resolved positions.  The external path passes [Fun.id], so this is a no-op
-   there (and the driver skips it).
+   positions carry a synthetic [pos_bol] key into its raw-location map (see
+   Cpp.Preprocessor); this turns them into resolved positions.  The external
+   path passes [Fun.id], so this is a no-op there (and the driver skips it).
 
    Locations live not only on the obvious Cabs nodes but on every
    [Symbol.identifier] and inside [Annot.attributes], so all three are rewritten.
@@ -23,7 +23,7 @@
 
 open Cabs
 
-let enrich f tu =
+let from_raw f tu =
   let el = Cerb_location.map_positions f in
   let ident (Symbol.Identifier (loc, s)) = Symbol.Identifier (el loc, s) in
   let ident_opt = Option.map ident in

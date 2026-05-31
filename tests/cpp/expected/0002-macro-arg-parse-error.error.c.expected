@@ -1,0 +1,4 @@
+cpp/0002-macro-arg-parse-error.error.c:2:29: error: unexpected token after '+' and before ';'
+parsing "additive_expression": seen "additive_expression PLUS", expecting "multiplicative_expression"
+int g(void) { return ID(3 +); }
+                            ^ 

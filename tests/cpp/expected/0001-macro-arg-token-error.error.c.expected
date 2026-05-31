@@ -1,0 +1,3 @@
+cpp/0001-macro-arg-token-error.error.c:1:24: error: invalid string character
+const char *p = ID("ooo\e");
+                       ^

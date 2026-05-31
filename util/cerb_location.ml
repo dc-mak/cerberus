@@ -38,7 +38,7 @@ let regions xs cur =
         (* TODO: need to sort the regions *)
         Loc_regions (xs, cur)
 
-(* Rewrite every Cerb_position in a location.  Used to enrich a parse tree's raw
+(* Rewrite every Cerb_position in a location.  Used to resolve a parse tree's raw
    positions (e.g. the internal preprocessor's side-table keys) into resolved
    positions after parsing. *)
 let map_cursor f = function
@@ -427,21 +427,21 @@ let string_at_line fname lnum cpos =
 
 
 (* Clang-style "note: expanded from:" chain for a position carrying internal-cpp
-   macro provenance (outermost-first frames; empty on the external path, so this
+   macro expansions (outermost-first uses; empty on the external path, so this
    is a no-op there).  Each note points its caret at the macro body / invocation
    the token came from. *)
-let provenance_notes pos =
-  let frame_note (frame : Cerb_position.macro_frame) =
-    let (start, _) = frame.Cerb_position.caret in
+let expansion_notes pos =
+  let use_note (use : Cerb_position.macro_use) =
+    let (start, _) = use.Cerb_position.caret in
     let file = start.Lexing.pos_fname in
     let lnum = start.Lexing.pos_lnum in
     let col = start.Lexing.pos_cnum - start.Lexing.pos_bol in (* 0-based *)
-    let descr = match frame.Cerb_position.macro_name with
-      | Some n -> Printf.sprintf " (in expansion of '%s')" n
+    let descr = match use.Cerb_position.macro_name with
+      | Some n -> Printf.sprintf "'%s'" n
       | None -> "" in
     let note =
       ansi_format ~err:true [Bold] (Printf.sprintf "%s:%d:%d:" file lnum (col + 1))
-      ^ " note: expanded from:" ^ descr in
+      ^ " note: expanded from macoro " ^ descr in
     match string_at_line file lnum (max 0 col) with
     | Some (_, l) ->
         "\n" ^ note ^ "\n" ^ l ^ "\n"
@@ -449,7 +449,7 @@ let provenance_notes pos =
             (String.init (col + 1) (fun n -> if n < col then ' ' else '^'))
     | None -> "\n" ^ note
   in
-  String.concat "" (List.map frame_note (Cerb_position.provenance pos))
+  String.concat "" (List.map use_note (Cerb_position.expansions pos))
 
 let head_pos_of_location = function
   | Loc_unknown ->
@@ -470,7 +470,7 @@ let head_pos_of_location = function
               ansi_format ~err:true [Bold; Green] (String.init (cpos + 1) (fun n -> if n < cpos then ' ' else '^'))
           | None ->
               "")
-        ^ provenance_notes pos )
+        ^ expansion_notes pos )
   | Loc_region (start_p, end_p, cursor) ->
       ( string_of_pos start_p
       , (let cpos1 = Cerb_position.column start_p - 1 in
@@ -494,7 +494,7 @@ let head_pos_of_location = function
               )
           | None ->
               "")
-        ^ provenance_notes start_p )
+        ^ expansion_notes start_p )
   | Loc_regions (xs, cursor) ->
       let pos = match cursor with
         | NoCursor -> fst (List.hd xs)
@@ -513,7 +513,7 @@ let head_pos_of_location = function
                          else ' ')
             )
         | None -> "")
-        ^ provenance_notes pos )
+        ^ expansion_notes pos )
 
 
 

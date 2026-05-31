@@ -24,7 +24,8 @@ type t
 val of_lexing : position -> t
 
 (* Record one more macro-invocation step, becoming the new innermost frame of
-   the chain (closest to the lexeme).  The [lexeme] is unchanged. *)
+   the chain (closest to the lexeme).  The [lexeme] is unchanged.  Used when the
+   engine drives deeper into a macro body. *)
 val push_expansion : frame -> t -> t
 
 (* The primary caret a diagnostic points at: the outermost invocation site if

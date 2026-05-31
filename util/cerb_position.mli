@@ -5,9 +5,10 @@ type t
     None] for tokens synthesised without a name), and the source region its
     "expanded from:" caret points at.  Empty for ordinary (external-cpp) tokens,
     so this field is invisible on the default path. *)
-type macro_frame =
+type macro_use =
   { macro_name : string option
   ; caret      : Lexing.position * Lexing.position }
+
 
 (** A placeholder position *)
 val dummy: t
@@ -39,7 +40,7 @@ val to_file_lexing: t -> Lexing.position
 (** The macro-expansion chain (outermost first); [] for ordinary positions.
     Filled by the internal-preprocessor token feed; read by the diagnostic
     renderer to emit Clang-style "expanded from:" notes. *)
-val provenance: t -> macro_frame list
+val expansions: t -> macro_use list
 
 (** Attach a macro-expansion chain to a position (functional update). *)
-val with_provenance: macro_frame list -> t -> t
+val with_expansions: macro_use list -> t -> t

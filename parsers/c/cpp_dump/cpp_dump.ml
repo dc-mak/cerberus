@@ -7,8 +7,8 @@ let () =
   match Sys.argv with
   | [| _; path |] ->
       let toks =
-        Cpp.Preprocessor.preprocess ~include_dirs:[] ~predefined:[] ~undefs:[]
-          ~forced_includes:[] ~filename:path
+        fst (Cpp.Preprocessor.preprocess ~include_dirs:[] ~predefined:[] ~undefs:[]
+          ~forced_includes:[] ~filename:path)
       in
       print_string (Cpp.Output.reconstruct toks)
   | _ ->

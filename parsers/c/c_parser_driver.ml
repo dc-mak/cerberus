@@ -2,8 +2,8 @@ open Cerb_frontend
 
 (* How to render an offending token in a parser error message differs between
    the two lexers: the text lexer reads a real lexbuf, so its lexeme can be
-   sliced out of the buffer; the internal-cpp token feed reads a dummy lexbuf, so
-   the lexeme is recovered from its spelling table.  [handle] takes this policy
+   sliced out of the buffer; the internal-cpp path reads a dummy lexbuf, so
+   the lexeme is recovered from the raw-location map.  [handle] takes this policy
    explicitly (rather than via global state), so the two cases stay separate. *)
 type show_token = Lexing.position * Lexing.position -> string
 
@@ -23,26 +23,21 @@ let text_show_token ~offset (lexbuf : Lexing.lexbuf) : show_token =
         lexbuf.lex_buffer_len offset
         (start.pos_cnum - offset) (curr.pos_cnum - offset)
 
-(* Token feed: recover the lexeme from the feed's spelling table by start key. *)
-let feed_show_token feed : show_token =
-  fun (start, _curr) ->
-    match Preproc_token_feed.lexeme_at feed start.Lexing.pos_cnum with
-    | Some s -> s
-    | None -> ""
-
-(* The internal feed gives the parser raw positions whose file pos_cnum is a
-   side-table key; resolve one through the feed.  (The text lexer's positions are
-   already real, so its enrich is Fun.id.) *)
-let feed_enrich feed (p : Cerb_position.t) =
-  match Preproc_token_feed.lookup feed (Cerb_position.to_file_lexing p).pos_cnum with
-  | Some resolved -> resolved
-  | None -> p
+(* Raised by the internal-cpp token supplier when the lexer rejects a character
+   inside a macro-body token.  The offending column is meaningless at the macro
+   *use* site (the body text is not spelled there), so the supplier resolves it
+   itself into a [Cerb_position.t] whose innermost "expanded from:" note caret is
+   the bad character, and [handle] turns that into a CPARSER failure directly —
+   without re-resolving any (dummy) lexbuf position. *)
+exception Error_in_expansion of Errors.cparser_cause * Cerb_position.t
 
 (* [to_pos] resolves a reported Lexing.position to a Cerb_position (it already
-   bakes in the lexer's enrich); [show_token] renders an offending lexeme.  Both
+   bakes in the lexer's from_raw); [show_token] renders an offending lexeme.  Both
    are supplied by the caller — no line map / global state is consulted here. *)
 let handle parse (token_pos_buffer, lexer) ~to_pos ~(show_token : show_token) lexbuf =
   try Exception.except_return (parse lexer lexbuf) with
+  | Error_in_expansion (err, pos) ->
+    Exception.fail (Cerb_location.point pos, Errors.CPARSER err)
   | C_lexer.Error err ->
     let loc = Cerb_location.point (to_pos (Lexing.lexeme_start_p lexbuf)) in
     Exception.fail (loc, Errors.CPARSER err)
@@ -78,7 +73,7 @@ let diagnostic_get_tokens ~inside_cn loc string =
   (* `C_lexer.magic_token' ensures `loc` is a region *)
   let start_pos = Option.get @@ start_pos loc in
   let lexbuf = Lexing.from_string string in
-  let `LEXER lexer = C_lexer.create_lexer ~inside_cn ~enrich:Fun.id in
+  let `LEXER lexer = C_lexer.create_lexer ~inside_cn () in
   let rec relex (toks, pos) =
     try
       match lexer lexbuf with
@@ -105,9 +100,9 @@ let parse_loc_string parse ~inside_cn (loc, str) =
   Lexing.set_filename lexbuf (Option.value ~default:"<none>" (Cerb_location.get_filename loc));
   (* TODO: the CN re-parse story (parse_loc_string / magic_comments_to_cn_toplevel)
      still needs to be figured out: the magic payload is re-lexed in its own
-     coordinate space, and how its positions/enrich should compose with the outer
+     coordinate space, and how its positions/from_raw should compose with the outer
      translation unit (especially under the internal cpp) is left for later. *)
-  let `LEXER cn_lexer = C_lexer.create_lexer ~inside_cn ~enrich:Fun.id in
+  let `LEXER cn_lexer = C_lexer.create_lexer ~inside_cn () in
   let offset = (Cerb_position.to_file_lexing start_pos).pos_cnum in
   handle
     parse
@@ -156,9 +151,9 @@ let magic_comments_to_cn_toplevel (Cabs.TUnit decls) =
   |> Exception.except_fmap (fun decls -> Cabs.TUnit (List.concat decls))
 
 let parse_with_magic_comments lexbuf =
-  (* Text lexer: the # line-marker rule sets real positions, so enrich = Fun.id
-     and no post-parse traversal is needed. *)
-  let `LEXER c_lexer = C_lexer.create_lexer ~inside_cn:false ~enrich:Fun.id in
+  (* Text lexer: the # line-marker rule sets real positions, so from_raw defaults
+     to Fun.id and no post-parse traversal is needed. *)
+  let `LEXER c_lexer = C_lexer.create_lexer ~inside_cn:false () in
   handle
     C_parser.translation_unit
     (MenhirLib.ErrorReports.wrap c_lexer)
@@ -170,22 +165,131 @@ let parse lexbuf =
   Exception.except_bind (parse_with_magic_comments lexbuf)
     magic_comments_to_cn_toplevel
 
-(* Parse a token stream produced by the internal preprocessor.  The [feed] (built
-   by the caller — see pipeline) is the "line map": it supplies Tokens.token
-   directly, gives the parser raw positions whose file pos_cnum is a side-table
-   key, and resolves them.  After parsing, Cabs_location_map resolves every
-   location through the feed; error locations are resolved by [to_pos].  No line
-   map / global state in the lexer. *)
-let parse_tokens ~filename feed =
-  let enrich = feed_enrich feed in
-  let to_pos x = enrich (Cerb_position.from_lexing x) in
-  let `LEXER lexer = Preproc_token_feed.lexer feed in
+(* Resolve a raw Lexing.position through the raw-location map: replace the
+   synthetic pos_bol key with the real line-start offset (so the column comes out
+   right) and attach the macro-expansion chain.  Positions not in the map (EOF,
+   or any external-path position) are returned unchanged. *)
+let from_raw map (p : Lexing.position) : Cerb_position.t =
+  match Cpp.Preprocessor.lookup map p.Lexing.pos_bol with
+  | None -> Cerb_position.from_lexing p
+  | Some e ->
+      let uses = List.map (fun (f : Cpp.Location.frame) ->
+          Cerb_position.{ macro_name = f.Cpp.Location.macro_name
+                        ; caret      = f.Cpp.Location.use })
+        e.Cpp.Preprocessor.expansions in
+      Cerb_position.with_expansions uses
+        (Cerb_position.from_lexing
+           { p with Lexing.pos_bol = e.Cpp.Preprocessor.actual_pos_bol })
+
+(* Shift the innermost macro-use note's caret right by [offset] columns.  A lex
+   error inside a macro-body token lands [offset] characters into that token's
+   spelling; the innermost "expanded from:" note points at the token's start, so
+   moving it by [offset] makes it land on the actual bad character. *)
+let shift_innermost_caret offset pos =
+  let bump (p : Lexing.position) =
+    { p with Lexing.pos_cnum = p.Lexing.pos_cnum + offset } in
+  match List.rev (Cerb_position.expansions pos) with
+  | [] -> pos
+  | inner :: rest ->
+      let s, e = inner.Cerb_position.caret in
+      let inner = { inner with Cerb_position.caret = (bump s, bump e) } in
+      Cerb_position.with_expansions (List.rev (inner :: rest)) pos
+
+(* Parse a token stream produced by the internal preprocessor.  [tokens] is the
+   expanded pp-token list; [map] resolves each token's synthetic pos_bol key to
+   its real source position and macro-expansion chain.
+
+   A single [create_lexer] instance lexes the whole stream, exactly as on the
+   text path — it carries the typedef-deferral state (the TYPE/VARIABLE markers)
+   across tokens.  Each pull feeds it a fresh lexbuf holding the head token's
+   lexeme, positioned at that token's real source start (accurate
+   pos_cnum/lnum/fname, synthetic pos_bol key).  c_lexer then produces exactly
+   the Tokens.token it would on the text path, including CERB_MAGIC for magic
+   comments, and tracks positions for free: an intra-token lex error (e.g. an
+   invalid string character) lands on the bad character's real pos_cnum, which
+   [from_raw] resolves through the same pos_bol key.
+
+   The deferral fires a TYPE/VARIABLE marker without consuming input, so on those
+   pulls the head token is left pending and the marker inherits the name's
+   position (the dummy lexbuf is left untouched).
+
+   TODO: this function is excessively complicated — the dual-lexbuf juggling
+   (one per-token [inner] plus the [dummy] that carries positions to Menhir), the
+   TYPE/VARIABLE un-pop, and the bespoke error resolution should be simplified
+   later, once the design has settled. *)
+let parse_tokens ~filename (tokens, map) =
+  let to_pos lp = from_raw map lp in
+  let from_raw_pos p = from_raw map (Cerb_position.to_file_lexing p) in
   let dummy = Lexing.from_string "" in
   Lexing.set_filename dummy filename;
-  handle C_parser.translation_unit (MenhirLib.ErrorReports.wrap lexer)
-    ~to_pos ~show_token:(feed_show_token feed) dummy
+  let rest = ref tokens in
+  let `LEXER lexer = C_lexer.create_lexer ~inside_cn:false ~from_raw:from_raw_pos () in
+  (* The head pp-token (Newlines skipped), not yet consumed. *)
+  let rec head () =
+    match !rest with
+    | tok :: tl ->
+        (match Cpp.Token.kind tok with
+         | Cpp.Token.Newline -> rest := tl; head ()
+         | _ -> Some tok)
+    | [] -> None
+  in
+  let supplier _ =
+    let h = head () in
+    (* [start] is the token's primary caret (the macro use for an expanded token);
+       [inner] holds the lexeme positioned there so c_lexer tracks real columns. *)
+    let start, inner = match h with
+      | Some tok ->
+          let lb = Lexing.from_string (Cpp.Token.lexeme tok) in
+          let s, _ = Cpp.Location.primary (Cpp.Token.loc tok) in
+          Lexing.set_filename lb s.Lexing.pos_fname;
+          Lexing.set_position lb s;
+          (s, lb)
+      | None ->
+          (* Drained: an empty lexbuf yields EOF.  pos_bol = -1 is not a key, so
+             from_raw leaves the EOF position alone. *)
+          let lb = Lexing.from_string "" in
+          let s = { Lexing.dummy_pos with pos_bol = -1 } in
+          Lexing.set_position lb s;
+          (s, lb)
+    in
+    let t =
+      try lexer inner
+      with C_lexer.Error err as ex ->
+        (match Cpp.Preprocessor.lookup map start.Lexing.pos_bol with
+         | Some e when (match e.Cpp.Preprocessor.expansions with [] -> false | _ :: _ -> true) ->
+             (* The token came from a macro body: the bad character sits [offset]
+                chars into its spelling, which is at the macro use site here.  Resolve
+                the position ourselves so the innermost "expanded from:" note caret
+                lands on the bad character, and raise it through [handle]. *)
+             let offset = inner.Lexing.lex_start_p.Lexing.pos_cnum - start.Lexing.pos_cnum in
+             let pos = shift_innermost_caret offset (from_raw map start) in
+             raise (Error_in_expansion (err, pos))
+         | _ ->
+             (* Ordinary token: the bad character's real position is accurate. *)
+             dummy.Lexing.lex_start_p <- inner.Lexing.lex_start_p;
+             dummy.Lexing.lex_curr_p  <- inner.Lexing.lex_start_p;
+             raise ex)
+    in
+    (match t with
+     | Tokens.TYPE | Tokens.VARIABLE ->
+         (* Deferral marker: [inner] was not consumed, so the head token is still
+            pending.  Leave the dummy positions as the name's. *)
+         ()
+     | _ ->
+         (match h with Some _ -> rest := List.tl !rest | None -> ());
+         dummy.Lexing.lex_start_p <- inner.Lexing.lex_start_p;
+         dummy.Lexing.lex_curr_p  <- inner.Lexing.lex_curr_p);
+    t
+  in
+  let show_token (start, _) =
+    match Cpp.Preprocessor.lookup map start.Lexing.pos_bol with
+    | Some e -> e.Cpp.Preprocessor.lexeme
+    | None -> ""
+  in
+  handle C_parser.translation_unit (MenhirLib.ErrorReports.wrap supplier)
+    ~to_pos ~show_token dummy
   |> fun result -> Exception.except_bind result magic_comments_to_cn_toplevel
-  |> Exception.except_fmap (Cabs_location_map.enrich enrich)
+  |> Exception.except_fmap (Cabs_location_map.from_raw from_raw_pos)
 
 let parse_from_channel input =
   let read f input =

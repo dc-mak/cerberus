@@ -42,14 +42,15 @@ val parse_from_string :
   Cerb_frontend.Exception.exceptM
 
 
-(** Parse a C translation unit from a token feed built from the internal
-    preprocessor's output (Preproc_token_feed.make), used when the [internal_cpp]
-    switch is set.  [filename] names the original source.  The feed is the "line
-    map": it carries the source positions/provenance used to resolve the parse
-    tree's raw positions. *)
+(** Parse a C translation unit from the token stream produced by the internal
+    preprocessor, used when the [internal_cpp] switch is set.  [filename] names
+    the original source.  The second argument is the pair returned by
+    [Cpp.Preprocessor.preprocess]: the expanded token list and the raw-location
+    map that resolves each token's synthetic [pos_bol] key to its real position
+    and macro-expansion chain. *)
 val parse_tokens :
   filename:string ->
-  Preproc_token_feed.t ->
+  Cpp.Location.t Cpp.Token.t list * Cpp.Preprocessor.raw_loc_map ->
   (Cerb_frontend.Cabs.translation_unit,
    Cerb_location.t * Cerb_frontend.Errors.cause)
   Cerb_frontend.Exception.exceptM

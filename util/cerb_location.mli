@@ -19,7 +19,7 @@ val point: Cerb_position.t -> t
 val region: Cerb_position.t * Cerb_position.t -> cursor -> t
 val regions: (Cerb_position.t * Cerb_position.t) list -> cursor -> t
 
-(* Rewrite every Cerb_position in a location (used to enrich raw parse-tree
+(* Rewrite every Cerb_position in a location (used to resolve raw parse-tree
    positions after parsing). *)
 val map_positions: (Cerb_position.t -> Cerb_position.t) -> t -> t
 

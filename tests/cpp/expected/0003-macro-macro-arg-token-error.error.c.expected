@@ -1,0 +1,6 @@
+cpp/0003-macro-macro-arg-token-error.error.c:3:20: error: invalid string character
+const char *p = ID(BAD);
+                   ^
+cpp/0003-macro-macro-arg-token-error.error.c:1:20: note: expanded from macoro 'BAD'
+#define BAD "oooooo\e"
+                   ^

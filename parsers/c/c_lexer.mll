@@ -10,11 +10,11 @@ type flags = {
   inside_cn : bool;           (* We are lexing in a CN comment *)
   magic_comment_char : char;  (* The character after a comment indicating to start a CN comment *)
   at_magic_comments : bool;   (* Should we process CN comments (true) or treat them as normal comments (false) *)
-  enrich : Cerb_position.t -> Cerb_position.t;
+  from_raw : Cerb_position.t -> Cerb_position.t;
   (* Fix up a raw position for error reporting.  No line map is maintained here:
      preprocessing has already happened upstream, so positions are either real
      (external cc -E, set directly by the # line-marker rule) or carry a
-     side-table key that the caller's [enrich] resolves.  See create_lexer. *)
+     side-table key that the caller's [from_raw] resolves.  See create_lexer. *)
 }
 
 (* A gcc-style line marker [# N "file"] from the preprocessor states that the
@@ -204,10 +204,10 @@ let cn_keywords =
   * 'unimplemented' - non-functional, but the keyword is reserved
 
 May raise `Not_found`, indicating `id` is not a recognized CN keyword. *)
-let cn_lex_keyword ~enrich id start_pos end_pos =
+let cn_lex_keyword ~from_raw id start_pos end_pos =
   let loc =
-    Cerb_location.(region (enrich (Cerb_position.from_lexing start_pos),
-                           enrich (Cerb_position.from_lexing end_pos)) NoCursor) in
+    Cerb_location.(region (from_raw (Cerb_position.from_lexing start_pos),
+                           from_raw (Cerb_position.from_lexing end_pos)) NoCursor) in
   (* Try to lex CN production keywords *)
   match Hashtbl.find cn_keywords id with
   | (Production, kw) -> kw
@@ -249,7 +249,7 @@ let magic_token flags start_pos end_pos chars =
   else if List.nth chars (len - 1) != flags.magic_comment_char then (
     prerr_endline
       (Pp_errors.make_message
-         (Cerb_location.point (flags.enrich (Cerb_position.from_lexing end_pos)))
+         (Cerb_location.point (flags.from_raw (Cerb_position.from_lexing end_pos)))
          Errors.(CPARSER Cparser_mismatched_magic_comment)
          Warning);
     None
@@ -630,7 +630,7 @@ and initial flags = parse
       {
         if flags.inside_cn then
           try
-            cn_lex_keyword ~enrich:flags.enrich id lexbuf.lex_start_p lexbuf.lex_curr_p
+            cn_lex_keyword ~from_raw:flags.from_raw id lexbuf.lex_start_p lexbuf.lex_curr_p
           with Not_found ->
             UNAME id
         else
@@ -643,7 +643,7 @@ and initial flags = parse
       with Not_found ->
         if flags.inside_cn then
           try
-            cn_lex_keyword ~enrich:flags.enrich id lexbuf.lex_start_p lexbuf.lex_curr_p
+            cn_lex_keyword ~from_raw:flags.from_raw id lexbuf.lex_start_p lexbuf.lex_curr_p
           with Not_found ->
             LNAME id
         else
@@ -661,11 +661,11 @@ type lexer_state =
   | LSRegular
   | LSIdentifier of string
 
-let lexer_flags ~inside_cn ~enrich =
+let lexer_flags ~inside_cn ~from_raw =
   let at_magic_comments = Switches.(has_switch SW_at_magic_comments) in
   let magic_comment_char =
     if Switches.(has_switch SW_magic_comment_char_dollar) then '$' else '@' in
-  { inside_cn; at_magic_comments; magic_comment_char; enrich }
+  { inside_cn; at_magic_comments; magic_comment_char; from_raw }
 
 (* The typedef "lexer hack" (Jourdan–Pottier): wrap a raw one-token producer so
    that after each LNAME/UNAME it emits a TYPE/VARIABLE marker on the *next* pull,
@@ -691,16 +691,13 @@ let defer_typedef (raw : lexbuf -> token) : [ `LEXER of lexbuf -> token ] =
         lexer_state := LSRegular;
         if Lexer_feedback.is_typedefname i then TYPE else VARIABLE)
 
-(* [enrich] fixes up the raw positions this lexer reports for error messages
-   (Fun.id for the external text lexer, whose positions are already real; the
-   side-table resolver when reused over the internal feed's positions). *)
-let create_lexer ~(inside_cn:bool) ~enrich : [ `LEXER of lexbuf -> token ] =
-  defer_typedef (fun lexbuf -> initial (lexer_flags ~inside_cn ~enrich) lexbuf)
-
-(* Decode one already-isolated token spelling through the lexer's own
-   constant/keyword/string rules, so the internal preprocessor's feed produces
-   exactly the Tokens.token c_lexer would.  Returns LNAME/UNAME for identifiers
-   (no typedef deferral here — the feed wraps this with defer_typedef). *)
-let token_of_string ~(inside_cn:bool) (s : string) : token =
-  initial (lexer_flags ~inside_cn ~enrich:Fun.id) (Lexing.from_string s)
+(* [from_raw] fixes up the raw positions this lexer reports for error messages.
+   For the external text lexer positions are already real so [from_raw] defaults
+   to [Fun.id].  For the internal-preprocessor path the caller passes the map's
+   resolver so error positions in CN warnings etc. are also fixed up.
+   [unit] last is required by OCaml's rule that optional arguments may not be
+   the final positional argument. *)
+let create_lexer ~(inside_cn:bool) ?from_raw () : [ `LEXER of lexbuf -> token ] =
+  let from_raw = Option.value ~default:Fun.id from_raw in
+  defer_typedef (fun lexbuf -> initial (lexer_flags ~inside_cn ~from_raw) lexbuf)
 }

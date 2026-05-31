@@ -259,17 +259,14 @@ let c_frontend ?(cn_init_scope=Cn_desugaring.empty_init)
         tokens straight to the parser (no cc -E, no text round-trip).  Uses the
         same structured -I / -D / -U / -include the driver built for cc -E, so
         the bundled libc headers and builtins resolve identically. *)
-     let expanded =
+     let result =
        Cpp.Preprocessor.preprocess
          ~include_dirs:cpp_config.cpp_include_dirs
          ~predefined:cpp_config.cpp_defines
          ~undefs:cpp_config.cpp_undefs
          ~forced_includes:cpp_config.cpp_forced_includes
          ~filename in
-     (* The token feed is the source-position "line map" the preprocessor hands
-        to the parser. *)
-     let feed = Preproc_token_feed.make expanded in
-     C_parser_driver.parse_tokens ~filename feed >>= parse_messages
+     C_parser_driver.parse_tokens ~filename result >>= parse_messages
    else
      cpp (conf, io) ~filename >>= fun file_content ->
      parse filename file_content)
