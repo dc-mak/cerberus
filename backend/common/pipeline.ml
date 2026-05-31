@@ -266,7 +266,10 @@ let c_frontend ?(cn_init_scope=Cn_desugaring.empty_init)
          ~undefs:cpp_config.cpp_undefs
          ~forced_includes:cpp_config.cpp_forced_includes
          ~filename in
-     C_parser_driver.parse_tokens ~filename expanded >>= parse_messages
+     (* The token feed is the source-position "line map" the preprocessor hands
+        to the parser. *)
+     let feed = Preproc_token_feed.make expanded in
+     C_parser_driver.parse_tokens ~filename feed >>= parse_messages
    else
      cpp (conf, io) ~filename >>= fun file_content ->
      parse filename file_content)

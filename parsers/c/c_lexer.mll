@@ -10,57 +10,22 @@ type flags = {
   inside_cn : bool;           (* We are lexing in a CN comment *)
   magic_comment_char : char;  (* The character after a comment indicating to start a CN comment *)
   at_magic_comments : bool;   (* Should we process CN comments (true) or treat them as normal comments (false) *)
+  enrich : Cerb_position.t -> Cerb_position.t;
+  (* Fix up a raw position for error reporting.  No line map is maintained here:
+     preprocessing has already happened upstream, so positions are either real
+     (external cc -E, set directly by the # line-marker rule) or carry a
+     side-table key that the caller's [enrich] resolves.  See create_lexer. *)
 }
 
-(* WARNING: GLOBAL STATE
-We wouldn't need this if the Lexing.position type was parameterized on the
-type of locations or if there was some way to extend the lexer buffer with
-additional user state, but I can't seem to find a way to do either of these,
-so for the time being we use a global variable.
-
-Note that one needs to call `init` when starting to work a
-new (preprocessed) file.
-*)
-module LineMap = struct
-
-  (** Maps a line in the preprocessed file to a filename and a line number.
-  The following lines in the preprocessed file reside at the specified source
-  location, until the next entry in the map. *)
-  let mapping = ref (Cerb_position.LineMap.empty "")
-
-  (** Clear all line mapping entries *)
-  let init file = mapping := Cerb_position.LineMap.empty file
-
-  (** Add a new line mapping *)
-  let add line info = mapping := Cerb_position.LineMap.add line info !mapping
-
-  (** Get the current mapping *)
-  let get () = !mapping
-
-  (** Make a position from a Lexing.position, consulting the line map.
-
-      On the internal-cpp path this returns a *raw* position: the feed gives
-      synthetic Lexing.positions whose pos_cnum is a side-table key, so the
-      result carries that key (in its file pos_cnum) and the driver resolves it
-      after parsing (Cabs_location_map + feed_enrich).  The external path's
-      positions are real, so this resolves the gcc-linemarker map as before. *)
-  let position x =
-    let p1 = Cerb_position.from_lexing x in
-    let src_loc = Cerb_position.LineMap.lookup (Cerb_position.line p1) !mapping in
-    Cerb_position.set_source src_loc p1
-
-end
-
-
-
-(* This is called when we we see a note from the pre-processor that
-we should change the file/line number (e.g., because of #include start/end) *)
+(* A gcc-style line marker [# N "file"] from the preprocessor states that the
+   *following* line is line N of "file"; set the lexbuf position directly so
+   Cerb_position.from_lexing is accurate, instead of maintaining a line map.
+   (new_line accounts for the newline the hash rule consumed.) *)
 let offset_location lexbuf pos_fname pos_lnum =
-  if pos_lnum > 0 then begin
-    LineMap.add lexbuf.lex_curr_p.pos_lnum (pos_fname, pos_lnum)
-  end;
-  new_line lexbuf
-  
+  new_line lexbuf;
+  if pos_lnum > 0 then
+    lexbuf.lex_curr_p <- { lexbuf.lex_curr_p with pos_fname; pos_lnum }
+
 
 (* STD §6.4.1#1 *)
 let keywords: (string * Tokens.token) list = [
@@ -248,7 +213,7 @@ let cn_lex_keyword id start_pos end_pos =
     Hashtbl.replace cn_keywords id (Production, kw);
     prerr_endline
       (Pp_errors.make_message
-        Cerb_location.(region (LineMap.position start_pos, LineMap.position end_pos) NoCursor)
+        Cerb_location.(region (Cerb_position.from_lexing start_pos, Cerb_position.from_lexing end_pos) NoCursor)
         Errors.(CPARSER (Errors.Cparser_experimental_keyword id))
         Warning);
     kw
@@ -257,7 +222,7 @@ let cn_lex_keyword id start_pos end_pos =
     Hashtbl.replace cn_keywords id (Production, kw);
     prerr_endline
       (Pp_errors.make_message
-        Cerb_location.(region (LineMap.position start_pos, LineMap.position end_pos) NoCursor)
+        Cerb_location.(region (Cerb_position.from_lexing start_pos, Cerb_position.from_lexing end_pos) NoCursor)
         Errors.(CPARSER (Errors.Cparser_deprecated_keyword (id, instead)))
         Warning);
     kw
@@ -283,13 +248,13 @@ let magic_token flags start_pos end_pos chars =
   else if List.nth chars (len - 1) != flags.magic_comment_char then (
     prerr_endline
       (Pp_errors.make_message
-         (Cerb_location.point (LineMap.position end_pos))
+         (Cerb_location.point (Cerb_position.from_lexing end_pos))
          Errors.(CPARSER Cparser_mismatched_magic_comment)
          Warning);
     None
   ) else (
     let str = String.init (len - 2) (List.nth (List.tl chars)) in
-    let loc = Cerb_location.(region (LineMap.position start_pos, LineMap.position end_pos) NoCursor) in
+    let loc = Cerb_location.(region (Cerb_position.from_lexing start_pos, Cerb_position.from_lexing end_pos) NoCursor) in
     let c = List.hd chars in
     Some (CERB_MAGIC (loc, (c,str)))
   )
@@ -695,11 +660,11 @@ type lexer_state =
   | LSRegular
   | LSIdentifier of string
 
-let lexer_flags ~inside_cn =
+let lexer_flags ~inside_cn ~enrich =
   let at_magic_comments = Switches.(has_switch SW_at_magic_comments) in
   let magic_comment_char =
     if Switches.(has_switch SW_magic_comment_char_dollar) then '$' else '@' in
-  { inside_cn; at_magic_comments; magic_comment_char }
+  { inside_cn; at_magic_comments; magic_comment_char; enrich }
 
 (* The typedef "lexer hack" (Jourdan–Pottier): wrap a raw one-token producer so
    that after each LNAME/UNAME it emits a TYPE/VARIABLE marker on the *next* pull,
@@ -725,13 +690,20 @@ let defer_typedef (raw : lexbuf -> token) : [ `LEXER of lexbuf -> token ] =
         lexer_state := LSRegular;
         if Lexer_feedback.is_typedefname i then TYPE else VARIABLE)
 
-let create_lexer ~(inside_cn:bool) : [ `LEXER of lexbuf -> token ] =
-  defer_typedef (fun lexbuf -> initial (lexer_flags ~inside_cn) lexbuf)
+(* Create a lexer over a real lexbuf, plus the [to_pos] it uses to turn the
+   reported Lexing.positions into resolved Cerb_positions for error messages.
+   [enrich] fixes up raw positions (Fun.id for the external text lexer, whose
+   positions are already real; the side-table resolver for the internal feed). *)
+let create_lexer ~(inside_cn:bool) ~enrich
+    : [ `LEXER of lexbuf -> token ] * (Lexing.position -> Cerb_position.t) =
+  let lexer = defer_typedef (fun lexbuf -> initial (lexer_flags ~inside_cn ~enrich) lexbuf) in
+  let to_pos x = enrich (Cerb_position.from_lexing x) in
+  (lexer, to_pos)
 
 (* Decode one already-isolated token spelling through the lexer's own
    constant/keyword/string rules, so the internal preprocessor's feed produces
    exactly the Tokens.token c_lexer would.  Returns LNAME/UNAME for identifiers
    (no typedef deferral here — the feed wraps this with defer_typedef). *)
 let token_of_string ~(inside_cn:bool) (s : string) : token =
-  initial (lexer_flags ~inside_cn) (Lexing.from_string s)
+  initial (lexer_flags ~inside_cn ~enrich:Fun.id) (Lexing.from_string s)
 }

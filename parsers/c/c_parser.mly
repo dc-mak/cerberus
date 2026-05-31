@@ -14,7 +14,10 @@ open Cn
 
 module LF = Lexer_feedback
 
-let pos x = C_lexer.LineMap.position x
+(* Raw position: the # line-marker rule sets real coordinates for the external
+   path, and the internal feed's side-table keys are resolved after parsing
+   (Cabs_location_map).  No line map is consulted here. *)
+let pos x = Cerb_position.from_lexing x
 let region (x,y) p = Cerb_location.region (pos x, pos y) p
 let point x = Cerb_location.point (pos x)
 let noCursor = Cerb_location.NoCursor
