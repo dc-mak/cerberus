@@ -5,57 +5,57 @@
    re-expansion, while expansion frames are pushed as [subst] copies body
    tokens. *)
 
-module HS = Preproc_token.Hide_set
+module HS = Token.Hide_set
 module SS = Set.Make (String)
 
 (* --- Token predicates ------------------------------------------------------ *)
 
 let is_ident t =
-  match Preproc_token.kind t with Preproc_token.Identifier -> true | _ -> false
+  match Token.kind t with Token.Identifier -> true | _ -> false
 
 let is_newline t =
-  match Preproc_token.kind t with Preproc_token.Newline -> true | _ -> false
+  match Token.kind t with Token.Newline -> true | _ -> false
 
 let is_punct s t =
-  match Preproc_token.kind t with
-  | Preproc_token.Punctuator -> String.equal (Preproc_token.spelling t) s
+  match Token.kind t with
+  | Token.Punctuator -> String.equal (Token.lexeme t) s
   | _ -> false
 
 (* --- Provenance ------------------------------------------------------------ *)
 
 (* Rebase a macro-body token onto the invocation site's provenance: keep its own
-   spelling (a position in the macro body) but make its expansion chain the
+   lexeme (a position in the macro body) but make its expansion chain the
    invoking token's chain extended by one frame for this macro, so nested
    expansions nest the way Clang's "expanded from:" notes do. *)
 let push_frames frames loc =
   let rec go loc = function
     | [] -> loc
-    | f :: fs -> go (Preproc_location.push_expansion f loc) fs
+    | f :: fs -> go (Location.push_expansion f loc) fs
   in
   go loc frames
 
 let rebase ~name ~invoked_at bt =
   let frame =
-    Preproc_location.
+    Location.
       { macro_name = Some name
-      ; use = Preproc_location.spelling (Preproc_token.loc invoked_at) }
+      ; use = Location.lexeme (Token.loc invoked_at) }
   in
   let frames =
-    Preproc_location.expansion (Preproc_token.loc invoked_at) @ [ frame ] in
-  let loc' = push_frames frames (Preproc_token.loc bt) in
-  Preproc_token.map (fun _ -> loc') bt
+    Location.expansion (Token.loc invoked_at) @ [ frame ] in
+  let loc' = push_frames frames (Token.loc bt) in
+  Token.map (fun _ -> loc') bt
 
 (* hsadd(HS, TS): union HS into every token's hide set. *)
 let rec hsadd hs = function
   | [] -> []
   | t :: ts ->
-      let t = Preproc_token.with_hide_set (HS.union hs (Preproc_token.hide_set t)) t in
+      let t = Token.with_hide_set (HS.union hs (Token.hide_set t)) t in
       t :: hsadd hs ts
 
 (* --- # and ## -------------------------------------------------------------- *)
 
 (* §6.10.3.2: only a backslash and double-quote *within* a string-literal or
-   character-constant spelling are escaped when stringizing. *)
+   character-constant lexeme are escaped when stringizing. *)
 let escape_for_string s =
   let buf = Buffer.create (String.length s) in
   String.iter
@@ -65,18 +65,18 @@ let escape_for_string s =
     s;
   Buffer.contents buf
 
-(* stringize(TS): one string-literal token from the actual's spellings, interior
+(* stringize(TS): one string-literal token from the actual's lexemes, interior
    white-space collapsed to single spaces, leading/trailing dropped. *)
 let stringize ~name ~invoked_at ~at actual =
   let buf = Buffer.create 16 in
   Buffer.add_char buf '"';
   List.iteri
     (fun i tok ->
-       if i > 0 && Preproc_token.preceded_by_space tok then Buffer.add_char buf ' ';
-       let s = Preproc_token.spelling tok in
+       if i > 0 && Token.preceded_by_space tok then Buffer.add_char buf ' ';
+       let s = Token.lexeme tok in
        let s =
-         match Preproc_token.kind tok with
-         | Preproc_token.String_literal | Preproc_token.Char_const ->
+         match Token.kind tok with
+         | Token.String_literal | Token.Char_const ->
              escape_for_string s
          | _ -> s
        in
@@ -84,20 +84,20 @@ let stringize ~name ~invoked_at ~at actual =
     actual;
   Buffer.add_char buf '"';
   let tok =
-    Preproc_token.make ~kind:Preproc_token.String_literal
-      ~spelling:(Buffer.contents buf)
-      ~preceded_by_space:(Preproc_token.preceded_by_space at)
-      ~loc:(Preproc_token.loc at) ()
+    Token.make ~kind:Token.String_literal
+      ~lexeme:(Buffer.contents buf)
+      ~preceded_by_space:(Token.preceded_by_space at)
+      ~loc:(Token.loc at) ()
   in
   rebase ~name ~invoked_at tok
 
-(* The kind a pasted spelling lexes to, so an identifier produced by ## is still
+(* The kind a pasted lexeme lexes to, so an identifier produced by ## is still
    recognised as a macro on rescan. *)
-let paste_kind spelling =
-  let toks = Preproc_lexer.tokens (Lexing.from_string spelling) in
+let paste_kind lexeme =
+  let toks = Lexer.tokens (Lexing.from_string lexeme) in
   match List.filter (fun t -> not (is_newline t)) toks with
-  | [ t ] -> Preproc_token.kind t
-  | _ -> Preproc_token.Other
+  | [ t ] -> Token.kind t
+  | _ -> Token.Other
 
 (* glue(LS, RS): paste the last token of LS onto the first of RS. *)
 let rec glue ls rs =
@@ -107,12 +107,12 @@ let rec glue ls rs =
       (match rs with
        | [] -> [ l ]
        | r :: rs' ->
-           let spelling = Preproc_token.spelling l ^ Preproc_token.spelling r in
-           let hide_set = HS.inter (Preproc_token.hide_set l) (Preproc_token.hide_set r) in
+           let lexeme = Token.lexeme l ^ Token.lexeme r in
+           let hide_set = HS.inter (Token.hide_set l) (Token.hide_set r) in
            let pasted =
-             Preproc_token.make ~kind:(paste_kind spelling) ~spelling
-               ~preceded_by_space:(Preproc_token.preceded_by_space l)
-               ~hide_set ~loc:(Preproc_token.loc l) ()
+             Token.make ~kind:(paste_kind lexeme) ~lexeme
+               ~preceded_by_space:(Token.preceded_by_space l)
+               ~hide_set ~loc:(Token.loc l) ()
            in
            pasted :: rs')
   | l :: ls' -> l :: glue ls' rs
@@ -128,9 +128,9 @@ let collect_args toks =
     | [] -> None
     | t :: rest when is_newline t -> go depth true cur args rest
     | t :: rest ->
-        let t = if space then Preproc_token.with_preceded_by_space true t else t in
+        let t = if space then Token.with_preceded_by_space true t else t in
         if depth = 0 && is_punct ")" t then
-          Some (List.rev (List.rev cur :: args), Preproc_token.hide_set t, rest)
+          Some (List.rev (List.rev cur :: args), Token.hide_set t, rest)
         else if depth = 0 && is_punct "," t then
           go 0 false [] (List.rev cur :: args) rest
         else
@@ -145,9 +145,9 @@ let collect_args toks =
 
 (* A synthetic comma to rejoin the actuals folded into __VA_ARGS__. *)
 let synth_comma =
-  Preproc_token.make ~kind:Preproc_token.Punctuator ~spelling:","
+  Token.make ~kind:Token.Punctuator ~lexeme:","
     ~preceded_by_space:false
-    ~loc:(Preproc_location.of_lexing (Lexing.dummy_pos, Lexing.dummy_pos)) ()
+    ~loc:(Location.of_lexing (Lexing.dummy_pos, Lexing.dummy_pos)) ()
 
 let rec join_with_commas = function
   | [] -> []
@@ -169,8 +169,8 @@ let build_assoc params variadic actuals =
   zip params actuals []
 
 let actual_of assoc t =
-  match Preproc_token.kind t with
-  | Preproc_token.Identifier -> List.assoc_opt (Preproc_token.spelling t) assoc
+  match Token.kind t with
+  | Token.Identifier -> List.assoc_opt (Token.lexeme t) assoc
   | _ -> None
 
 let is_param assoc t =
@@ -185,7 +185,7 @@ let rec skip_newlines = function
    parameter) it stands in for. *)
 let set_first_space space = function
   | [] -> []
-  | t :: ts -> Preproc_token.with_preceded_by_space space t :: ts
+  | t :: ts -> Token.with_preceded_by_space space t :: ts
 
 (* --- expand / subst -------------------------------------------------------- *)
 
@@ -222,7 +222,7 @@ let rec subst macros ~name ~invoked_at assoc is hs os =
      the parameter's spacing *)
   | t :: is' when is_param assoc t ->
       let actual = Option.value (actual_of assoc t) ~default:[] in
-      let sub = set_first_space (Preproc_token.preceded_by_space t) (expand macros actual) in
+      let sub = set_first_space (Token.preceded_by_space t) (expand macros actual) in
       subst macros ~name ~invoked_at assoc is' hs (os @ sub)
   (* otherwise: copy the body token, recording provenance *)
   | t :: is' ->
@@ -234,14 +234,14 @@ let rec subst macros ~name ~invoked_at assoc is hs os =
 and expand macros = function
   | [] -> []
   | t :: ts when is_ident t ->
-      let name = Preproc_token.spelling t in
-      if HS.mem name (Preproc_token.hide_set t) then t :: expand macros ts
+      let name = Token.lexeme t in
+      if HS.mem name (Token.hide_set t) then t :: expand macros ts
       else begin
         match Macro_table.find name macros with
         | Some (Macro_table.Object_like body) ->
-            let hs = HS.add name (Preproc_token.hide_set t) in
+            let hs = HS.add name (Token.hide_set t) in
             let out = subst macros ~name ~invoked_at:t [] body hs [] in
-            let out = set_first_space (Preproc_token.preceded_by_space t) out in
+            let out = set_first_space (Token.preceded_by_space t) out in
             expand macros (out @ ts)
         | Some (Macro_table.Function_like { params; variadic; body }) ->
             (* Invoked only if the next token (past any newlines) is '('. *)
@@ -250,9 +250,9 @@ and expand macros = function
                  (match collect_args after with
                   | Some (actuals, close_hs, rest) ->
                       let assoc = build_assoc params variadic actuals in
-                      let hs = HS.add name (HS.inter (Preproc_token.hide_set t) close_hs) in
+                      let hs = HS.add name (HS.inter (Token.hide_set t) close_hs) in
                       let out = subst macros ~name ~invoked_at:t assoc body hs [] in
-                      let out = set_first_space (Preproc_token.preceded_by_space t) out in
+                      let out = set_first_space (Token.preceded_by_space t) out in
                       expand macros (out @ rest)
                   | None -> t :: expand macros ts)
              | _ -> t :: expand macros ts)
@@ -269,7 +269,7 @@ let rec parse_params acc = function
       let rest = match rest with r :: rs when is_punct ")" r -> rs | rs -> rs in
       (List.rev acc, true, rest)
   | t :: rest when is_ident t ->
-      let acc = Preproc_token.spelling t :: acc in
+      let acc = Token.lexeme t :: acc in
       (match rest with
        | c :: rest' when is_punct "," c -> parse_params acc rest'
        | r :: rest' when is_punct ")" r -> (List.rev acc, false, rest')
@@ -281,12 +281,12 @@ let do_define macros = function
       let def =
         match rest with
         | lp :: rest'
-          when is_punct "(" lp && not (Preproc_token.preceded_by_space lp) ->
+          when is_punct "(" lp && not (Token.preceded_by_space lp) ->
             let params, variadic, body = parse_params [] rest' in
             Macro_table.Function_like { params; variadic; body }
         | _ -> Macro_table.Object_like rest
       in
-      (match Macro_table.define (Preproc_token.spelling name) def macros with
+      (match Macro_table.define (Token.lexeme name) def macros with
        | Ok macros' -> macros'
        (* Incompatible redefinition: keep the existing definition for now;
           diagnostics arrive with the frontend integration. *)
@@ -294,7 +294,7 @@ let do_define macros = function
   | _ -> macros
 
 let do_undef macros = function
-  | n :: _ when is_ident n -> Macro_table.undef (Preproc_token.spelling n) macros
+  | n :: _ when is_ident n -> Macro_table.undef (Token.lexeme n) macros
   | _ -> macros
 
 (* --- Conditional inclusion (§6.10.1) --------------------------------------- *)
@@ -310,31 +310,31 @@ let emitting = function [] -> true | f :: _ -> f.active
 (* Substitute each literal [defined X] / [defined(X)] with 0 or 1 before the line
    is macro-expanded, so the operand is not itself expanded. *)
 let mk_num present template =
-  Preproc_token.make ~kind:Preproc_token.Pp_number
-    ~spelling:(if present then "1" else "0")
-    ~preceded_by_space:(Preproc_token.preceded_by_space template)
-    ~loc:(Preproc_token.loc template) ()
+  Token.make ~kind:Token.Pp_number
+    ~lexeme:(if present then "1" else "0")
+    ~preceded_by_space:(Token.preceded_by_space template)
+    ~loc:(Token.loc template) ()
 
 let rec replace_defined macros = function
   | d :: rest
-    when is_ident d && String.equal (Preproc_token.spelling d) "defined" ->
+    when is_ident d && String.equal (Token.lexeme d) "defined" ->
       (match rest with
        | lp :: n :: rp :: rest'
          when is_punct "(" lp && is_ident n && is_punct ")" rp ->
-           mk_num (Macro_table.mem (Preproc_token.spelling n) macros) d
+           mk_num (Macro_table.mem (Token.lexeme n) macros) d
            :: replace_defined macros rest'
        | n :: rest' when is_ident n ->
-           mk_num (Macro_table.mem (Preproc_token.spelling n) macros) d
+           mk_num (Macro_table.mem (Token.lexeme n) macros) d
            :: replace_defined macros rest'
        | _ -> d :: replace_defined macros rest)
   | t :: rest -> t :: replace_defined macros rest
   | [] -> []
 
 (* Evaluate a #if / #elif controlling expression: resolve [defined], expand, then
-   hand the result to Cpp_eval.  An ill-formed expression counts as false. *)
+   hand the result to Eval.  An ill-formed expression counts as false. *)
 let eval_cond macros toks =
   let expanded = expand macros (replace_defined macros toks) in
-  match Cpp_eval.eval expanded with Ok b -> b | Error _ -> false
+  match Eval.eval expanded with Ok b -> b | Error _ -> false
 
 let push_if conds ~outer ~cond =
   let active = outer && cond in
@@ -363,16 +363,16 @@ let apply_directive macros conds ds =
   match ds with
   | [] -> (macros, conds)  (* null directive *)
   | d :: rest ->
-      (match Preproc_token.spelling d with
+      (match Token.lexeme d with
        | "define" -> ((if em then do_define macros rest else macros), conds)
        | "undef" -> ((if em then do_undef macros rest else macros), conds)
        | "ifdef" ->
            let cond =
-             match rest with n :: _ -> Macro_table.mem (Preproc_token.spelling n) macros | _ -> false in
+             match rest with n :: _ -> Macro_table.mem (Token.lexeme n) macros | _ -> false in
            (macros, push_if conds ~outer:em ~cond)
        | "ifndef" ->
            let cond =
-             match rest with n :: _ -> not (Macro_table.mem (Preproc_token.spelling n) macros) | _ -> false in
+             match rest with n :: _ -> not (Macro_table.mem (Token.lexeme n) macros) | _ -> false in
            (macros, push_if conds ~outer:em ~cond)
        | "if" -> (macros, push_if conds ~outer:em ~cond:(em && eval_cond macros rest))
        | "elif" -> (macros, do_elif conds (fun () -> eval_cond macros rest))
@@ -400,25 +400,25 @@ let lex_file filename =
   let ic = open_in filename in
   let lexbuf = Lexing.from_channel ic in
   Lexing.set_filename lexbuf filename;
-  let toks = Preproc_lexer.tokens lexbuf in
+  let toks = Lexer.tokens lexbuf in
   close_in ic;
-  List.map (Preproc_token.map Preproc_location.of_lexing) toks
+  List.map (Token.map Location.of_lexing) toks
 
 (* The header name and whether it was the angle-bracket form, from the tokens
    after `include`.  "..." takes the string-literal content; <...> concatenates
-   the spellings between the brackets.  (Computed/macro includes are not yet
+   the lexemes between the brackets.  (Computed/macro includes are not yet
    handled.) *)
 let include_target ds =
   match ds with
-  | s :: _ when (match Preproc_token.kind s with
-                 | Preproc_token.String_literal -> true | _ -> false) ->
-      let sp = Preproc_token.spelling s in
+  | s :: _ when (match Token.kind s with
+                 | Token.String_literal -> true | _ -> false) ->
+      let sp = Token.lexeme s in
       if String.length sp >= 2 then Some (String.sub sp 1 (String.length sp - 2), false)
       else None
   | t :: rest when is_punct "<" t ->
       let rec collect acc = function
         | u :: _ when is_punct ">" u -> Some (String.concat "" (List.rev acc))
-        | u :: us -> collect (Preproc_token.spelling u :: acc) us
+        | u :: us -> collect (Token.lexeme u :: acc) us
         | [] -> None
       in
       (match collect [] rest with Some n -> Some (n, true) | None -> None)
@@ -458,13 +458,13 @@ let rec process_lines ~include_dirs ~dir ~canon macros once acc conds pending li
            (match ds with
             | d :: drest
               when em && is_ident d
-                   && String.equal (Preproc_token.spelling d) "include" ->
+                   && String.equal (Token.lexeme d) "include" ->
                 let inc, macros, once = do_include ~include_dirs ~dir macros once drest in
                 process_lines ~include_dirs ~dir ~canon macros once (inc :: acc) conds [] rest
             | d :: e :: _
               when em && is_ident d && is_ident e
-                   && String.equal (Preproc_token.spelling d) "pragma"
-                   && String.equal (Preproc_token.spelling e) "once" ->
+                   && String.equal (Token.lexeme d) "pragma"
+                   && String.equal (Token.lexeme e) "once" ->
                 process_lines ~include_dirs ~dir ~canon macros (SS.add canon once) acc conds [] rest
             | _ ->
                 let macros, conds = apply_directive macros conds ds in
@@ -496,9 +496,9 @@ and do_include ~include_dirs ~dir macros once ds =
 
 (* Lex a -D macro value (or "1" for a bare -DNAME) into a replacement list. *)
 let lex_value s =
-  Preproc_lexer.tokens (Lexing.from_string s)
+  Lexer.tokens (Lexing.from_string s)
   |> List.filter (fun t -> not (is_newline t))
-  |> List.map (Preproc_token.map Preproc_location.of_lexing)
+  |> List.map (Token.map Location.of_lexing)
 
 let rec seed_defines macros = function
   | [] -> macros

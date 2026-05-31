@@ -2,9 +2,9 @@
    operates on.
 
    The type is parameterised over the kind of location it carries: the lexer
-   produces [(Lexing.position * Lexing.position) t] (a bare spelling region),
-   and once the engine lifts the stream it works in [Preproc_location.t t]
-   (spelling + macro-expansion chain).  [map] rewrites just the location, which
+   produces [(Lexing.position * Lexing.position) t] (a bare lexeme region),
+   and once the engine lifts the stream it works in [Location.t t]
+   (lexeme + macro-expansion chain).  [map] rewrites just the location, which
    is how the lift and the per-step provenance pushes are done. *)
 
 (* The hide set of a token (Prosser's [HS]): the macros whose names must not be
@@ -32,14 +32,14 @@ type 'loc t
 
 val make :
   kind:kind ->
-  spelling:string ->
+  lexeme:string ->
   preceded_by_space:bool ->
   ?hide_set:Hide_set.t ->
   loc:'loc ->
   unit -> 'loc t
 
 val kind : 'loc t -> kind
-val spelling : 'loc t -> string
+val lexeme : 'loc t -> string
 
 (* Whether whitespace (or a comment) separated this token from the previous one
    on its line; needed to reproduce significant spacing and the [#] stringizing

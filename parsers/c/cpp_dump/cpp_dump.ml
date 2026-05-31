@@ -7,10 +7,10 @@ let () =
   match Sys.argv with
   | [| _; path |] ->
       let toks =
-        Cpp.preprocess ~include_dirs:[] ~predefined:[] ~undefs:[]
+        Cpp.Preprocessor.preprocess ~include_dirs:[] ~predefined:[] ~undefs:[]
           ~forced_includes:[] ~filename:path
       in
-      print_string (Preproc_output.reconstruct toks)
+      print_string (Cpp.Output.reconstruct toks)
   | _ ->
       prerr_endline "usage: cpp_dump <file.c>";
       exit 2

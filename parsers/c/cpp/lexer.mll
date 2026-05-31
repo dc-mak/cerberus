@@ -5,12 +5,12 @@ open Lexing
    [Skip] (recorded as "the next token is preceded by space"); everything that
    the preprocessor keeps — including explicit [Newline]s — produces [Tok]. *)
 type lexeme =
-  | Tok of (position * position) Preproc_token.t
+  | Tok of (position * position) Token.t
   | Skip
   | Done
 
 let mk space kind lexbuf =
-  Preproc_token.make ~kind ~spelling:(Lexing.lexeme lexbuf)
+  Token.make ~kind ~lexeme:(Lexing.lexeme lexbuf)
     ~preceded_by_space:space
     ~loc:(lexbuf.lex_start_p, lexbuf.lex_curr_p) ()
 }
@@ -51,7 +51,7 @@ let escape_sequence =
 
 (* Lenient at phase 3: a backslash escapes any following character (even an
    invalid escape like \e), so the whole literal is one token.  c_lexer validates
-   and decodes it when the feed re-lexes the spelling — matching where the
+   and decodes it when the feed re-lexes the lexeme — matching where the
    external path reports an invalid-string-character error. *)
 let s_char = [^ '"' '\\' '\n'] | '\\' [^ '\n']
 let c_char = [^ '\'' '\\' '\n'] | '\\' [^ '\n']
@@ -62,7 +62,7 @@ let string_literal = string_encoding? '"' s_char* '"'
 let char_const = char_encoding? "'" c_char+ "'"
 
 (* §6.4.6 punctuators (including digraphs).  [#] and [##] matter to the engine;
-   the rest are carried through verbatim by spelling. *)
+   the rest are carried through verbatim by lexeme. *)
 let punctuator =
     "%:%:" | "..." | "<<=" | ">>="
   (* Cerberus/CN extensions c_lexer also recognises (kept as single tokens so the
@@ -88,10 +88,10 @@ rule one space = parse
         let n = String.length inner in
         if n >= 1 && inner.[n - 1] = delim then
           let payload = String.sub inner 0 (n - 1) in
-          let spelling = Printf.sprintf "/*%c%s*/" delim inner in
-          Tok (Preproc_token.make
-                 ~kind:(Preproc_token.Magic { delimiter = delim; payload })
-                 ~spelling ~preceded_by_space:space
+          let lexeme = Printf.sprintf "/*%c%s*/" delim inner in
+          Tok (Token.make
+                 ~kind:(Token.Magic { delimiter = delim; payload })
+                 ~lexeme ~preceded_by_space:space
                  ~loc:(start_p, lexbuf.lex_curr_p) ())
         else
           (* Not a well-formed magic comment: treat as ordinary whitespace. *)
@@ -100,24 +100,24 @@ rule one space = parse
   | "/*" { block_comment lexbuf; Skip }
   | "//" { line_comment lexbuf; Skip }
 
-  | '\n' { let t = mk space Preproc_token.Newline lexbuf in
+  | '\n' { let t = mk space Token.Newline lexbuf in
            new_line lexbuf; Tok t }
   | whitespace_char+ { Skip }
 
-  | string_literal { Tok (mk space Preproc_token.String_literal lexbuf) }
-  | char_const     { Tok (mk space Preproc_token.Char_const lexbuf) }
-  | pp_number      { Tok (mk space Preproc_token.Pp_number lexbuf) }
-  | identifier     { Tok (mk space Preproc_token.Identifier lexbuf) }
+  | string_literal { Tok (mk space Token.String_literal lexbuf) }
+  | char_const     { Tok (mk space Token.Char_const lexbuf) }
+  | pp_number      { Tok (mk space Token.Pp_number lexbuf) }
+  | identifier     { Tok (mk space Token.Identifier lexbuf) }
   (* C2x attribute opener: kept as one token (matching c_lexer's lbrack_lbrack)
      so the feed's re-lex yields LBRACK_LBRACK rather than two LBRACK, which the
      grammar needs to disambiguate from array declarators. *)
-  | '[' whitespace_char* '[' { Tok (mk space Preproc_token.Punctuator lexbuf) }
-  | punctuator     { Tok (mk space Preproc_token.Punctuator lexbuf) }
+  | '[' whitespace_char* '[' { Tok (mk space Token.Punctuator lexbuf) }
+  | punctuator     { Tok (mk space Token.Punctuator lexbuf) }
 
   | eof { Done }
 
   (* §6.4#1: any other single non-whitespace character is its own pp-token. *)
-  | _   { Tok (mk space Preproc_token.Other lexbuf) }
+  | _   { Tok (mk space Token.Other lexbuf) }
 
 (* A block comment is replaced by one space; its internal newlines are retained
    only for line counting (§5.1.1.2), so they do not break the logical line. *)

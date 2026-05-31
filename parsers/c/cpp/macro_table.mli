@@ -1,9 +1,9 @@
 (* The macro environment threaded through the engine: an immutable map from macro
    name to its definition (C11 §6.10.3).  Bodies are stored already lifted to the
-   engine's location type, with empty hide sets and spellings pointing into the
+   engine's location type, with empty hide sets and lexemes pointing into the
    #define that introduced them. *)
 
-type token = Preproc_location.t Preproc_token.t
+type token = Location.t Token.t
 
 type definition =
   | Object_like of token list
@@ -17,8 +17,8 @@ type t
 val empty : t
 
 (* §6.10.3#1-2: a name may be redefined only by an *identical* replacement list
-   (same tokens, same spellings, same interior white-space) and, for
-   function-like macros, the same parameter spellings and variadic flag.  A
+   (same tokens, same lexemes, same interior white-space) and, for
+   function-like macros, the same parameter lexemes and variadic flag.  A
    benign (identical) redefinition returns [Ok]; an incompatible one returns
    [Error old] with the previous, conflicting definition so the caller can
    diagnose it. *)

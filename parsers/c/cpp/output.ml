@@ -13,19 +13,19 @@ let reconstruct toks =
         if has_content then Buffer.add_char buf '\n'
     | t :: rest ->
         let has_content =
-          match Preproc_token.kind t with
-          | Preproc_token.Newline ->
+          match Token.kind t with
+          | Token.Newline ->
               (* cscout keeps a single trailing space before the newline when the
                  source had whitespace there (the Newline token records it). *)
               if has_content then begin
-                if Preproc_token.preceded_by_space t then Buffer.add_char buf ' ';
+                if Token.preceded_by_space t then Buffer.add_char buf ' ';
                 Buffer.add_char buf '\n'
               end;
               false
           | _ ->
-              if has_content && Preproc_token.preceded_by_space t then
+              if has_content && Token.preceded_by_space t then
                 Buffer.add_char buf ' ';
-              Buffer.add_string buf (Preproc_token.spelling t);
+              Buffer.add_string buf (Token.lexeme t);
               true
         in
         go has_content rest

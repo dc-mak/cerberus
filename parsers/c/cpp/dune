@@ -1,0 +1,11 @@
+; The in-tree C preprocessor (translation phases 3-4).  Self-contained: depends
+; only on the stdlib, so it can sit below the C parser without a cycle.  Wrapped,
+; so the modules are Cpp.Location, Cpp.Token, Cpp.Lexer, Cpp.Macro_table,
+; Cpp.Eval, Cpp.Output, Cpp.Preprocessor.
+(library
+ (name cpp)
+ (public_name cerberus-lib.cpp)
+ (wrapped true)
+ (flags (:standard -w -27-32-69)))
+
+(ocamllex lexer)

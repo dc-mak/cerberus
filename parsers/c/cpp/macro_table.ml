@@ -1,6 +1,6 @@
 module Env = Map.Make (String)
 
-type token = Preproc_location.t Preproc_token.t
+type token = Location.t Token.t
 
 type definition =
   | Object_like of token list
@@ -13,13 +13,13 @@ type t = definition Env.t
 
 let empty = Env.empty
 
-(* Token equivalence for the §6.10.3 redefinition check: spelling, kind, hide set
+(* Token equivalence for the §6.10.3 redefinition check: lexeme, kind, hide set
    and white-space flag must match; the location does not (it points into a
    different #define).  Bodies are freshly defined so hide sets are empty, and a
    replacement list's first token is always space-separated from the name, so
    comparing the flag verbatim does not spuriously reject the "ignore leading
    white-space" cases of the Standard. *)
-let token_compat = Preproc_token.compare (fun _ _ -> 0)
+let token_compat = Token.compare (fun _ _ -> 0)
 
 let rec same_tokens a b =
   match a, b with
@@ -54,7 +54,7 @@ let mem name t = Env.mem name t
 
 let print_tokens ppf toks =
   List.iter
-    (fun tok -> Format.fprintf ppf "@ %s" (Preproc_token.spelling tok))
+    (fun tok -> Format.fprintf ppf "@ %s" (Token.lexeme tok))
     toks
 
 let print_definition ppf = function

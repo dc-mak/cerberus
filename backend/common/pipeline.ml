@@ -260,7 +260,7 @@ let c_frontend ?(cn_init_scope=Cn_desugaring.empty_init)
         same structured -I / -D / -U / -include the driver built for cc -E, so
         the bundled libc headers and builtins resolve identically. *)
      let expanded =
-       Cpp.preprocess
+       Cpp.Preprocessor.preprocess
          ~include_dirs:cpp_config.cpp_include_dirs
          ~predefined:cpp_config.cpp_defines
          ~undefs:cpp_config.cpp_undefs

@@ -26,7 +26,7 @@ let text_show_token ~offset (lexbuf : Lexing.lexbuf) : show_token =
 (* Token feed: recover the lexeme from the feed's spelling table by start key. *)
 let feed_show_token feed : show_token =
   fun (start, _curr) ->
-    match Preproc_token_feed.spelling_at feed start.Lexing.pos_cnum with
+    match Preproc_token_feed.lexeme_at feed start.Lexing.pos_cnum with
     | Some s -> s
     | None -> ""
 
@@ -87,7 +87,7 @@ let diagnostic_get_tokens ~inside_cn loc string =
         let Lexing.{ pos_lnum; pos_bol; pos_cnum; _ } = lexbuf.lex_start_p in
         let (line, col) =
           (* the first line needs to have columns shifted by /*@ but the rest do not *)
-          let col_off = if pos_lnum > 1 then 1 else Cerb_position.column start_pos in
+          let col_off = if inside_cn && pos_lnum > 1 then 1 else Cerb_position.column start_pos in
           let fi_pos = Cerb_position.to_file_lexing start_pos in
           (pos_lnum + fi_pos.pos_lnum, col_off + pos_cnum - pos_bol) in
         relex (Tokens.string_of_token t :: toks, (line, col) :: pos)
@@ -97,7 +97,7 @@ let diagnostic_get_tokens ~inside_cn loc string =
   in
   relex ([], [])
 
-let parse_loc_string parse (loc, str) =
+let parse_loc_string parse ~inside_cn (loc, str) =
   let lexbuf = Lexing.from_string str in
   (* `C_lexer.magic_token' ensures `loc` is a region *)
   let start_pos = Option.get @@ start_pos loc in
@@ -107,7 +107,7 @@ let parse_loc_string parse (loc, str) =
      still needs to be figured out: the magic payload is re-lexed in its own
      coordinate space, and how its positions/enrich should compose with the outer
      translation unit (especially under the internal cpp) is left for later. *)
-  let `LEXER cn_lexer = C_lexer.create_lexer ~inside_cn:true ~enrich:Fun.id in
+  let `LEXER cn_lexer = C_lexer.create_lexer ~inside_cn ~enrich:Fun.id in
   let offset = (Cerb_position.to_file_lexing start_pos).pos_cnum in
   handle
     parse
@@ -147,7 +147,7 @@ let update_enclosing_region payload_region xs =
 let magic_comments_to_cn_toplevel (Cabs.TUnit decls) =
   let magic_comments_to_cn_toplevel = function
     | Cabs.EDecl_magic (loc, str) ->
-      parse_loc_string C_parser.cn_toplevel (loc, str)
+      parse_loc_string C_parser.cn_toplevel ~inside_cn:true (loc, str)
       |> Exception.except_fmap (update_enclosing_region loc)
     | decl ->
       Exception.except_return [decl] in

@@ -1,7 +1,7 @@
 (* The macro engine — translation phase 4 (C11 §6.10).
 
    [preprocess ~include_dirs ~filename] reads and lexes [filename], lifts the
-   tokens to the provenance-carrying [Preproc_location.t] (so rescanning can
+   tokens to the provenance-carrying [Location.t] (so rescanning can
    splice freshly produced tokens ahead of pending input), and runs Prosser's
    expand/subst/hsadd under a line-oriented directive loop.
 
@@ -18,4 +18,4 @@ val preprocess :
   undefs:string list ->
   forced_includes:string list ->
   filename:string ->
-  Preproc_location.t Preproc_token.t list
+  Location.t Token.t list

@@ -13,6 +13,7 @@ The first argument is the thing we are parsing,
 the second one is a located string that needs to be parsed. *)
 val parse_loc_string :
   ((Lexing.lexbuf -> Tokens.token) -> Lexing.lexbuf -> 'a) ->
+  inside_cn:bool ->
   Cerb_location.t * string ->
   ('a, Cerb_location.t * Cerb_frontend.Errors.cause)
   Cerb_frontend.Exception.exceptM

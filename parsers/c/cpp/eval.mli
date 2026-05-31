@@ -14,4 +14,4 @@
    expression (a float, an unbalanced paren, division by zero, …) yields an
    [Error] message rather than raising. *)
 
-val eval : Preproc_location.t Preproc_token.t list -> (bool, string) result
+val eval : Location.t Token.t list -> (bool, string) result

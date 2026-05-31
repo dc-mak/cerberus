@@ -1,5 +1,5 @@
-; cpp_dump links a concrete implementation of the virtual cerb_frontend (any
-; will do — it only exercises the preprocessor, which is memory-model agnostic).
+; cpp_dump only exercises the self-contained preprocessor engine (stdlib only),
+; so it links just the cpp library.
 (executable
  (name cpp_dump)
- (libraries c_parser mem_concrete))
+ (libraries cpp))

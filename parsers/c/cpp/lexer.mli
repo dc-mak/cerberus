@@ -10,4 +10,4 @@
    ([preceded_by_space] on the following token). *)
 
 val tokens :
-  Lexing.lexbuf -> (Lexing.position * Lexing.position) Preproc_token.t list
+  Lexing.lexbuf -> (Lexing.position * Lexing.position) Token.t list

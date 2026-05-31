@@ -14,7 +14,7 @@
 
 type t
 
-val make : Preproc_location.t Preproc_token.t list -> t
+val make : Cpp.Location.t Cpp.Token.t list -> t
 
 val lexer : t -> [ `LEXER of Lexing.lexbuf -> Tokens.token ]
 
@@ -22,6 +22,6 @@ val lexer : t -> [ `LEXER of Lexing.lexbuf -> Tokens.token ]
    consults this in internal-cpp mode.  [None] if the key is unknown. *)
 val lookup : t -> int -> Cerb_position.t option
 
-(* The spelling of the token whose start position has the given [pos_cnum] key;
+(* The lexeme of the token whose start position has the given [pos_cnum] key;
    the parser error path uses this to show the offending lexeme. *)
-val spelling_at : t -> int -> string option
+val lexeme_at : t -> int -> string option

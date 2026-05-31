@@ -7,4 +7,4 @@
    where a token is [preceded_by_space], and each non-empty logical line is
    newline-terminated. *)
 
-val reconstruct : _ Preproc_token.t list -> string
+val reconstruct : _ Token.t list -> string

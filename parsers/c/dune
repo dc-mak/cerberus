@@ -5,9 +5,9 @@
  (flags (:standard -w -27-32))
  (modules :standard)
  (wrapped false)
- (libraries menhirLib cerb_frontend))
+ (libraries menhirLib cerb_frontend cpp))
 
-(ocamllex c_lexer preproc_lexer)
+(ocamllex c_lexer)
 (menhir
  (flags (--external-tokens Tokens --exn-carries-state))
  (modules c_parser))

@@ -5,22 +5,22 @@ type frame =
   ; use        : position }
 
 (* The expansion chain is held outermost-first.  [push_expansion] appends, so a
-   freshly pushed frame is the innermost one (nearest the spelling), matching how
+   freshly pushed frame is the innermost one (nearest the lexeme), matching how
    the engine drives deeper into nested macro bodies. *)
 type t =
-  { spelling  : position
+  { lexeme  : position
   ; expansion : frame list }
 
-let of_lexing spelling = { spelling; expansion = [] }
+let of_lexing lexeme = { lexeme; expansion = [] }
 
 let push_expansion frame t = { t with expansion = t.expansion @ [frame] }
 
 let primary t =
   match t.expansion with
-  | [] -> t.spelling
+  | [] -> t.lexeme
   | frame :: _ -> frame.use
 
-let spelling t = t.spelling
+let lexeme t = t.lexeme
 
 let expansion t = t.expansion
 
@@ -59,7 +59,7 @@ let rec compare_frames fs1 fs2 =
       if c <> 0 then c else compare_frames r1 r2
 
 let compare t1 t2 =
-  let c = compare_position t1.spelling t2.spelling in
+  let c = compare_position t1.lexeme t2.lexeme in
   if c <> 0 then c else compare_frames t1.expansion t2.expansion
 
 let print_position ppf ((p, _) : position) =
@@ -72,6 +72,6 @@ let print_frame ppf frame =
   Format.fprintf ppf "expanded from %s at %a" name print_position frame.use
 
 let print ppf t =
-  Format.fprintf ppf "@[<v>spelled at %a" print_position t.spelling;
+  Format.fprintf ppf "@[<v>spelled at %a" print_position t.lexeme;
   List.iter (fun f -> Format.fprintf ppf "@,%a" print_frame f) t.expansion;
   Format.fprintf ppf "@]"

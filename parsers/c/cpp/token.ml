@@ -17,16 +17,16 @@ type kind =
 
 type 'loc t =
   { kind              : kind
-  ; spelling          : string
+  ; lexeme          : string
   ; preceded_by_space : bool
   ; hide_set          : Hide_set.t
   ; loc               : 'loc }
 
-let make ~kind ~spelling ~preceded_by_space ?(hide_set = Hide_set.empty) ~loc () =
-  { kind; spelling; preceded_by_space; hide_set; loc }
+let make ~kind ~lexeme ~preceded_by_space ?(hide_set = Hide_set.empty) ~loc () =
+  { kind; lexeme; preceded_by_space; hide_set; loc }
 
 let kind t = t.kind
-let spelling t = t.spelling
+let lexeme t = t.lexeme
 let preceded_by_space t = t.preceded_by_space
 let hide_set t = t.hide_set
 let loc t = t.loc
@@ -60,7 +60,7 @@ let compare_kind k1 k2 =
 let compare compare_loc t1 t2 =
   let c = compare_kind t1.kind t2.kind in
   if c <> 0 then c else
-  let c = String.compare t1.spelling t2.spelling in
+  let c = String.compare t1.lexeme t2.lexeme in
   if c <> 0 then c else
   let c = Bool.compare t1.preceded_by_space t2.preceded_by_space in
   if c <> 0 then c else
@@ -70,4 +70,4 @@ let compare compare_loc t1 t2 =
 
 let print print_loc ppf t =
   let space = if t.preceded_by_space then "_" else "" in
-  Format.fprintf ppf "@[%s%S at %a@]" space t.spelling print_loc t.loc
+  Format.fprintf ppf "@[%s%S at %a@]" space t.lexeme print_loc t.loc

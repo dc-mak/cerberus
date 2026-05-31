@@ -15,32 +15,32 @@ let unsigned a b = a.u || b.u
 (* --- Local token predicates (kept independent of the engine) --------------- *)
 
 let is_newline t =
-  match Preproc_token.kind t with Preproc_token.Newline -> true | _ -> false
+  match Token.kind t with Token.Newline -> true | _ -> false
 
 let is_punct s t =
-  match Preproc_token.kind t with
-  | Preproc_token.Punctuator -> String.equal (Preproc_token.spelling t) s
+  match Token.kind t with
+  | Token.Punctuator -> String.equal (Token.lexeme t) s
   | _ -> false
 
 (* --- Decoding numeric and character constants ------------------------------ *)
 
 (* Strip the integer suffix, reporting whether a u/U was present, and normalise
    the prefix so Int64.of_string can parse it (octal needs an explicit 0o). *)
-let decode_number spelling =
-  let n = String.length spelling in
+let decode_number lexeme =
+  let n = String.length lexeme in
   (* count trailing [uUlL] *)
   let rec suffix_start i =
     if i > 0 then
-      match spelling.[i - 1] with
+      match lexeme.[i - 1] with
       | 'u' | 'U' | 'l' | 'L' -> suffix_start (i - 1)
       | _ -> i
     else i
   in
   let body_end = suffix_start n in
-  let suffix = String.sub spelling body_end (n - body_end) in
+  let suffix = String.sub lexeme body_end (n - body_end) in
   let unsigned =
     String.exists (fun c -> Char.equal c 'u' || Char.equal c 'U') suffix in
-  let body = String.sub spelling 0 body_end in
+  let body = String.sub lexeme 0 body_end in
   (* a '.' or a decimal exponent makes it a floating constant, illegal in #if *)
   let is_float =
     String.exists (fun c -> Char.equal c '.') body
@@ -50,7 +50,7 @@ let decode_number spelling =
              && (Char.equal lower.[1] 'x'))
         && String.exists (fun c -> Char.equal c 'e') lower)
   in
-  if is_float then Error ("floating constant in #if: " ^ spelling)
+  if is_float then Error ("floating constant in #if: " ^ lexeme)
   else
     let normalised =
       let lower = String.lowercase_ascii body in
@@ -68,15 +68,15 @@ let decode_number spelling =
         (* a decimal too large for signed int64 is an unsigned intmax constant *)
         (match Int64.of_string_opt ("0u" ^ normalised) with
          | Some v -> ok { v; u = true }
-         | None -> Error ("invalid integer constant in #if: " ^ spelling))
+         | None -> Error ("invalid integer constant in #if: " ^ lexeme))
 
 (* The value of a character constant: decode the (possibly escaped) first
    c-char.  Encoding prefixes (L/u/U) are ignored. *)
-let decode_char spelling =
+let decode_char lexeme =
   let body =
-    match String.index_opt spelling '\'' with
-    | Some i -> String.sub spelling (i + 1) (String.length spelling - i - 2)
-    | None -> spelling
+    match String.index_opt lexeme '\'' with
+    | Some i -> String.sub lexeme (i + 1) (String.length lexeme - i - 2)
+    | None -> lexeme
   in
   let code =
     if String.length body >= 2 && Char.equal body.[0] '\\' then
@@ -92,8 +92,8 @@ let decode_char spelling =
   in
   { v = Int64.of_int code; u = false }
 
-let ident_value spelling =
-  match spelling with
+let ident_value lexeme =
+  match lexeme with
   | "true" -> { v = 1L; u = false }
   | _ -> { v = 0L; u = false }
 
@@ -122,7 +122,7 @@ let shr a b =
 let cmp a b = if unsigned a b then Int64.unsigned_compare a.v b.v
               else Int64.compare a.v b.v
 
-(* Map an operator spelling to its semantics for a given precedence level. *)
+(* Map an operator lexeme to its semantics for a given precedence level. *)
 let mul_op t =
   if is_punct "*" t then Some (wrap Int64.mul)
   else if is_punct "/" t then Some div_op
@@ -188,12 +188,12 @@ let rec parse_primary toks =
        | t2 :: toks'' when is_punct ")" t2 -> ok (v, toks'')
        | _ -> Error "expected ')' in #if expression")
   | t :: toks' ->
-      (match Preproc_token.kind t with
-       | Preproc_token.Pp_number ->
-           let* v = decode_number (Preproc_token.spelling t) in ok (v, toks')
-       | Preproc_token.Char_const -> ok (decode_char (Preproc_token.spelling t), toks')
-       | Preproc_token.Identifier -> ok (ident_value (Preproc_token.spelling t), toks')
-       | _ -> Error ("unexpected '" ^ Preproc_token.spelling t ^ "' in #if expression"))
+      (match Token.kind t with
+       | Token.Pp_number ->
+           let* v = decode_number (Token.lexeme t) in ok (v, toks')
+       | Token.Char_const -> ok (decode_char (Token.lexeme t), toks')
+       | Token.Identifier -> ok (ident_value (Token.lexeme t), toks')
+       | _ -> Error ("unexpected '" ^ Token.lexeme t ^ "' in #if expression"))
   | [] -> Error "unexpected end of #if expression"
 
 and parse_unary toks =
