@@ -36,6 +36,8 @@ cpp_only=(
   0002-macro-arg-parse-error.error.c        # parse error in a macro argument
   0003-macro-macro-arg-token-error.error.c  # arg is a macro expanding to a bad string
   0004-macro-macro-arg-parse-error.error.c  # arg is a macro expanding to a parse error
+  0005-magic-comment-macro.error.c          # object-like macro expanded in a CN magic comment
+  0006-magic-comment-macro-arg.error.c      # function-like macro expanded in a CN magic comment
 )
 
 function doSkip {
@@ -80,10 +82,12 @@ if [[ $# == 1 ]]; then
 fi
 
 # Run one test under --switches internal_cpp and compare to its .expected.
-# $1: the directory holding the test (ci or cpp); $2: the test file name.
+# $1: the directory holding the test (ci or cpp); $2: the test file name;
+# $3 (optional): extra switches appended to internal_cpp (e.g. at_magic_comments).
 function run_test {
   dir=$1
   file=$2
+  switches="internal_cpp${3:+,$3}"
   if [ ! -f ./$dir/$file ]; then
     echo -e "Test $file: \033[1m\033[33mNOT FOUND\033[0m";
     fail=$((fail+1));
@@ -96,9 +100,9 @@ function run_test {
   fi
 
   if [[ $file == *.syntax-only.c ]]; then
-    $CERB --switches internal_cpp --nolibc --typecheck-core $dir/$file > tmp/result 2> tmp/stderr
+    $CERB --switches $switches --nolibc --typecheck-core $dir/$file > tmp/result 2> tmp/stderr
   else
-    $CERB --switches internal_cpp --nolibc --typecheck-core --exec --batch $dir/$file 1> tmp/result 2> tmp/stderr
+    $CERB --switches $switches --nolibc --typecheck-core --exec --batch $dir/$file 1> tmp/result 2> tmp/stderr
   fi
   ret=$?;
   if [ -f ./$dir/expected/$file.expected ]; then
@@ -138,7 +142,9 @@ do
 done
 for file in "${cpp_only[@]}"
 do
-  run_test cpp $file
+  # The cpp-only tests include CN magic comments, which only become CERB_MAGIC
+  # tokens (and so are macro-expanded + re-parsed) under at_magic_comments.
+  run_test cpp $file at_magic_comments
 done
 echo "CPP PASSED: $pass"
 echo "CPP FAILED: $fail"

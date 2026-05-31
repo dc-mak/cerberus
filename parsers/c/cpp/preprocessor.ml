@@ -438,63 +438,96 @@ let resolve ~include_dirs ~dir ~angled name =
   in
   find dirs
 
+(* --- Magic-comment macro snapshots ----------------------------------------- *)
+
+let is_magic tok =
+  match Token.kind tok with Token.Magic _ -> true | _ -> false
+
+(* A magic comment is keyed, until [assign_keys] gives it a synthetic key, by its
+   spelling start (file + absolute byte offset, unique per file).  Stable across
+   expansion: a [Magic] token passes through [expand] untouched. *)
+module Src_key = struct
+  type t = string * int
+  let compare (f1, c1) (f2, c2) =
+    let c = String.compare f1 f2 in
+    if c <> 0 then c else Int.compare c1 c2
+end
+
+module Src_map = Map.Make (Src_key)
+
+let magic_src_key tok =
+  let s, _ = Location.primary (Token.loc tok) in
+  (s.Lexing.pos_fname, s.Lexing.pos_cnum)
+
+(* At each flush every [Magic] token in the chunk sees the same in-scope [macros]
+   — a #define/#undef is a directive, which forces its own flush — so associate
+   that table with each magic comment, to expand its CN payload on re-parse.
+   Threaded functionally (like [once]); no mutable side table. *)
+let record_magics snaps macros toks =
+  List.fold_left
+    (fun s t -> if is_magic t then Src_map.add (magic_src_key t) macros s else s)
+    snaps toks
+
 (* --- Line-oriented driver (per file, threading macros + #pragma once) ------- *)
 
 (* Process one file's lines.  [conds] is local (a #if must close in its file);
-   [macros] and [once] thread across includes.  Output is accumulated as a
-   reversed list of token chunks.  Emitting runs of non-directive lines are
-   expanded together (function-like invocations may span newlines); a directive
-   flushes the pending text and emits nothing.  In a skipped region text is
-   dropped but conditionals are still tracked. *)
-let rec process_lines ~include_dirs ~dir ~canon macros once acc conds pending lines =
+   [macros], [once] and [snaps] (per-magic-comment macro tables) thread across
+   includes.  Output is accumulated as a reversed list of token chunks.  Emitting
+   runs of non-directive lines are expanded together (function-like invocations
+   may span newlines); a directive flushes the pending text and emits nothing.
+   In a skipped region text is dropped but conditionals are still tracked. *)
+let rec process_lines ~include_dirs ~dir ~canon macros once snaps acc conds pending lines =
+  let flush snaps =
+    let chunk = List.concat (List.rev pending) in
+    (record_magics snaps macros chunk, expand macros chunk) in
   match lines with
   | [] ->
-      (expand macros (List.concat (List.rev pending)) :: acc, macros, once)
+      let snaps, flushed = flush snaps in
+      (flushed :: acc, macros, once, snaps)
   | (ltoks, nl) :: rest ->
       (match ltoks with
        | t :: ds when is_punct "#" t ->
            let em = emitting conds in
-           let flushed =
-             if em then expand macros (List.concat (List.rev pending)) else [] in
+           let snaps, flushed = if em then flush snaps else (snaps, []) in
            let acc = flushed :: acc in
            (match ds with
             | d :: drest
               when em && is_ident d
                    && String.equal (Token.lexeme d) "include" ->
-                let inc, macros, once = do_include ~include_dirs ~dir macros once drest in
-                process_lines ~include_dirs ~dir ~canon macros once (inc :: acc) conds [] rest
+                let inc, macros, once, snaps = do_include ~include_dirs ~dir macros once snaps drest in
+                process_lines ~include_dirs ~dir ~canon macros once snaps (inc :: acc) conds [] rest
             | d :: e :: _
               when em && is_ident d && is_ident e
                    && String.equal (Token.lexeme d) "pragma"
                    && String.equal (Token.lexeme e) "once" ->
-                process_lines ~include_dirs ~dir ~canon macros (SS.add canon once) acc conds [] rest
+                process_lines ~include_dirs ~dir ~canon macros (SS.add canon once) snaps acc conds [] rest
             | _ ->
                 let macros, conds = apply_directive macros conds ds in
-                process_lines ~include_dirs ~dir ~canon macros once acc conds [] rest)
+                process_lines ~include_dirs ~dir ~canon macros once snaps acc conds [] rest)
        | _ ->
            if emitting conds then
              let chunk = match nl with Some n -> ltoks @ [ n ] | None -> ltoks in
-             process_lines ~include_dirs ~dir ~canon macros once acc conds (chunk :: pending) rest
+             process_lines ~include_dirs ~dir ~canon macros once snaps acc conds (chunk :: pending) rest
            else
-             process_lines ~include_dirs ~dir ~canon macros once acc conds pending rest)
+             process_lines ~include_dirs ~dir ~canon macros once snaps acc conds pending rest)
 
 (* Resolve and splice an included file, sharing the macro table and honouring
    #pragma once (keyed by resolved path).  A missing header is skipped silently
    here; the frontend integration will diagnose it. *)
-and do_include ~include_dirs ~dir macros once ds =
+and do_include ~include_dirs ~dir macros once snaps ds =
   match include_target ds with
-  | None -> ([], macros, once)
+  | None -> ([], macros, once, snaps)
   | Some (name, angled) ->
       (match resolve ~include_dirs ~dir ~angled name with
-       | None -> ([], macros, once)
-       | Some path when SS.mem path once -> ([], macros, once)
+       | None -> ([], macros, once, snaps)
+       | Some path when SS.mem path once -> ([], macros, once, snaps)
        | Some path ->
            let lines = split_lines (lex_file path) in
-           let acc, macros, once =
+           let acc, macros, once, snaps =
              process_lines ~include_dirs ~dir:(Filename.dirname path) ~canon:path
-               macros once [] [] [] lines
+               macros once snaps [] [] [] lines
            in
-           (List.concat (List.rev acc), macros, once))
+           (List.concat (List.rev acc), macros, once, snaps))
 
 (* Lex a -D macro value (or "1" for a bare -DNAME) into a replacement list. *)
 let lex_value s =
@@ -523,6 +556,16 @@ type entry =
   ; lexeme         : string
   }
 
+(* The macro environments in scope at each magic comment, keyed by the synthetic
+   [pos_bol] key [assign_keys] gives that comment's [Magic] token (the same key
+   the CERB_MAGIC location carries into the AST).  Immutable and separate from
+   [raw_loc_map]: only magic comments have an entry. *)
+module Int_map = Map.Make (Int)
+
+type macro_defns = Macro_table.t Int_map.t
+
+let find_macro_defns defns key = Int_map.find_opt key defns
+
 (* The raw_loc_map is a hash table keyed by the synthetic [pos_bol].  Abstract in
    the .mli, so callers can only [lookup]. *)
 type raw_loc_map = (int, entry) Hashtbl.t
@@ -550,44 +593,67 @@ let expansion_notes loc =
    raw_loc_map.  Each key is a counter value (unique across the stream).  The
    real [pos_bol] goes into the entry; [pos_fname], [pos_lnum], and [pos_cnum]
    stay accurate in the token's position, so the raw token is useful for
-   debugging even without the map. *)
-let assign_keys toks =
+   debugging even without the map.  [snaps] maps each magic comment (by spelling
+   start) to its in-scope macro table; the result re-keys those by the magic
+   token's synthetic key into [macro_defns]. *)
+let assign_keys snaps toks =
   let map : raw_loc_map = Hashtbl.create 256 in
-  let counter = ref 0 in
-  let keyed = List.map (fun tok ->
-    match Token.kind tok with
-    | Token.Newline -> tok
-    | _ ->
-        let key = !counter in
-        counter := key + 1;
-        let s, e = Location.primary (Token.loc tok) in
-        Hashtbl.replace map key
-          { actual_pos_bol = s.Lexing.pos_bol
-          ; expansions     = expansion_notes (Token.loc tok)
-          ; lexeme         = Token.lexeme tok };
-        (* Give the token a plain (unexpanded) location at its primary caret with
-           the synthetic key in pos_bol — pos_fname/pos_lnum/pos_cnum stay
-           accurate.  The expansion chain is already captured in the map entry, so
-           the rewritten location carries no frames: its primary is exactly this
-           caret, which is what the parser driver positions the lexer at. *)
-        let s' = { s with Lexing.pos_bol = key } in
-        Token.map (fun _ -> Location.of_lexing (s', e)) tok
-  ) toks in
-  (keyed, map)
+  let rec go counter defns acc = function
+    | [] -> (List.rev acc, defns)
+    | tok :: rest ->
+        (match Token.kind tok with
+         | Token.Newline -> go counter defns (tok :: acc) rest
+         | _ ->
+             let key = counter in
+             let s, e = Location.primary (Token.loc tok) in
+             Hashtbl.replace map key
+               { actual_pos_bol = s.Lexing.pos_bol
+               ; expansions     = expansion_notes (Token.loc tok)
+               ; lexeme         = Token.lexeme tok };
+             let defns =
+               if is_magic tok then
+                 match Src_map.find_opt (magic_src_key tok) snaps with
+                 | Some m -> Int_map.add key m defns
+                 | None -> defns
+               else defns in
+             (* Give the token a plain (unexpanded) location at its primary caret
+                with the synthetic key in pos_bol — pos_fname/pos_lnum/pos_cnum
+                stay accurate.  The expansion chain is already captured in the map
+                entry, so the rewritten location carries no frames: its primary is
+                exactly this caret, which is what the parser driver positions the
+                lexer at. *)
+             let s' = { s with Lexing.pos_bol = key } in
+             let tok = Token.map (fun _ -> Location.of_lexing (s', e)) tok in
+             go (key + 1) defns (tok :: acc) rest)
+  in
+  let keyed, defns = go 0 Int_map.empty [] toks in
+  (keyed, map, defns)
 
 let preprocess ~include_dirs ~predefined ~undefs ~forced_includes ~filename =
   let macros0 = seed_undefs (seed_defines Macro_table.empty predefined) undefs in
   (* Forced includes (e.g. builtins.h) are processed before the main file, as if
      textually included at the top: their output is prepended and their macros
      thread into the main file. *)
-  let rec go macros once acc = function
-    | [] -> assign_keys (List.concat (List.rev acc))
+  let rec go macros once snaps acc = function
+    | [] -> assign_keys snaps (List.concat (List.rev acc))
     | f :: fs ->
         let lines = split_lines (lex_file f) in
-        let out_acc, macros, once =
+        let out_acc, macros, once, snaps =
           process_lines ~include_dirs ~dir:(Filename.dirname f) ~canon:f
-            macros once [] [] [] lines
+            macros once snaps [] [] [] lines
         in
-        go macros once (List.concat (List.rev out_acc) :: acc) fs
+        go macros once snaps (List.concat (List.rev out_acc) :: acc) fs
   in
-  go macros0 SS.empty [] (forced_includes @ [ filename ])
+  go macros0 SS.empty Src_map.empty [] (forced_includes @ [ filename ])
+
+(* Re-parse hook for CN magic comments: lex a payload string, expand it with the
+   macro table that was in scope at the comment, and hand back the same located
+   tokens + raw_loc_map the main feed consumes.  [lexbuf] should already be
+   positioned (filename + start) at the payload's place in the original file, so
+   columns come out right.  No magic comments nest inside a payload, so the
+   discarded [macro_defns] is empty. *)
+let expand_fragment macros lexbuf =
+  let toks =
+    Lexer.tokens lexbuf |> List.map (Token.map Location.of_lexing) in
+  let keyed, map, _ = assign_keys Src_map.empty (expand macros toks) in
+  (keyed, map)

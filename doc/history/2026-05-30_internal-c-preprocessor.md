@@ -814,13 +814,143 @@ tokens.
   function records that it should be simplified later (a good moment for the
   deferred Menhir-incremental-API investigation).
 
-- **Remaining:** C17 (expand macros in magic comments — explicitly deferred until
-  parity + the map were settled, which they now are; this also needs the
-  `parse_loc_string` / `magic_comments_to_cn_toplevel` CN re-parse story figured
-  out under the internal-cpp coordinate scheme) and C18 (trigraphs + backslash-
-  newline splicing, phases 1–2 pre-pass; unblocks `cpp01-trigtest` and the
-  remaining cscout goldens). Lower priority: honour `conf.cpp_save` on the internal
-  path; simplify `parse_tokens`; lazy/eager position-mapping switch.
+### C17 design — expand macros in top-level magic comments (2026-05-31)
+
+**Goal.** Under `--switches internal_cpp`, macro-expand the contents of a
+top-level `/*@ … @*/` magic comment using the macros in scope *at that comment's
+position*, so e.g. `#define N 10` makes `/*@ requires x < N @*/` see `10`.
+
+**The Lem obstacle (decided with user).** A magic payload reaches the CN
+re-parse as a bare `string` carried in a *Lem-generated* type
+(`Cabs.EDecl_magic : Loc.t * string` at top level; `Annot.attributes` for the
+statement/loop/call sites), and `cerb_frontend` does not depend on the `cpp`
+library — so an OCaml `Cpp.Macro_table.t` **cannot ride through the AST**. The
+macro table is therefore threaded *out of band*, not in Cabs.
+
+**Carrier — a local side table (chosen over a raw_loc_map field).**
+`Cpp.Preprocessor` captures, per magic comment, the macro table in scope and
+surfaces it; `C_parser_driver.parse_tokens` keeps a *local* table keyed by the
+magic token's synthetic key and hands it to `magic_comments_to_cn_toplevel`.
+- *Snapshot capture (engine).* Within one run of non-directive lines the macro
+  table is constant (a `#define`/`#undef` is a directive, which forces a flush),
+  so at each flush in `process_lines` every `Magic` token in the chunk shares the
+  current `macros`. Record `src-position → macros` into a mutable table threaded
+  through `process_lines`/`do_include`. `assign_keys` then copies the snapshot
+  into the token's `entry.macro_defns` (new `Macro_table.t option` field, `Some`
+  only for `Magic` tokens). The engine's public `macro_defns` type is just
+  `Macro_table.t` (already opaque).
+- *Driver.* `parse_tokens`' supplier, on the `CERB_MAGIC` it gets back from
+  `c_lexer`, looks up the magic token's key in the map and stashes
+  `key → macro_defns` in a local `(int, Macro_table.t) Hashtbl` (keyed by the
+  synthetic `pos_bol`, which the `EDecl_magic` loc still carries because the magic
+  post-pass runs *before* `Cabs_location_map.from_raw`). Keying by the int avoids
+  generic equality on `Cerb_location.t`.
+
+**Re-parse — reuse `parse_tokens`, expanding the payload as located tokens.**
+`parse_loc_string` gains `?macro_defns`. With `None` (external path, or the
+internal path before this change) it is unchanged: a text lexbuf + `create_lexer`.
+With `Some defns`:
+1. `Cpp.Preprocessor.expand_fragment defns lexbuf` lexes the payload string
+   (`Cpp.Lexer.tokens`, lifted via `Location.of_lexing`), runs `expand defns`,
+   and `assign_keys` → `(Location.t Token.t list, raw_loc_map)`.
+2. Feed that through the *same* token-feed core as the main parser, but with
+   `~parse:C_parser.cn_toplevel` and `~inside_cn:true` (so `c_lexer` still decodes
+   CN keywords from the expanded lexemes).
+
+**Position resolution — eager for the fragment.** The main path defers position
+resolution to a post-pass (`Cabs_location_map.from_raw` over the `TUnit`), which
+recovers real `pos_bol` *and* attaches expansion chains. That post-pass **does not
+descend into CN subtrees** and expects a `TUnit`, whereas `cn_toplevel` returns a
+CN external-declaration list. Writing a full CN traversal is out of scope, so the
+fragment feed instead **resolves positions eagerly**: the supplier writes
+`Cerb_position.to_file_lexing (from_raw map p)` (real `pos_bol`/`pos_cnum`) onto
+the dummy lexbuf, so CN nodes are built with correct columns and *no* post-pass is
+needed. Consequence (accepted for this cut): CN diagnostics get **accurate
+file:line:column but no “expanded from:” notes** inside the magic comment — except
+lex errors, which still route through `Error_in_expansion` and so keep their chain.
+`parse_tokens` is refactored into a shared `feed` core parameterised by
+`~inside_cn`, `~parse`, and an eager/lazy flag; the top-level wrapper keeps the
+lazy `TUnit` post-pass, the fragment wrapper uses eager + no post-pass.
+
+**Scope (chosen).** Top-level `EDecl_magic` only. Statement/loop/call-site magic
+re-parses later in `Cabs_to_ail`, which has neither the map nor the snapshots;
+threading `macro_defns` there is a deferred follow-up.
+
+**Risks / parity.** Existing internal-path magic tests use no macros, so `expand`
+is the identity and the eager-resolved columns must match the current text path;
+verified against `run-cpp.sh`. `Cpp.Lexer` must tokenise CN payloads acceptably
+(it produces generic pp-tokens; CN keyword/`inside_cn` handling stays in
+`c_lexer`). A new `tests/cpp` case exercises a macro used inside `/*@ … @*/`.
+
+**C17 status — done (2026-05-31).** Implemented as above:
+- `Cpp.Preprocessor.preprocess` now returns `(tokens, raw_loc_map, macro_defns)`,
+  where `macro_defns : Macro_table.t Int_map.t` is built immutably (snapshots
+  threaded functionally through `process_lines`/`do_include` like `once`, then
+  re-keyed by synthetic key in `assign_keys`). New `expand_fragment`.
+- `c_parser_driver`: `parse_tokens` refactored into a shared `feed_parse` core
+  (params `~inside_cn ~eager ~parse`); top-level is lazy + `TUnit` post-pass, the
+  fragment is eager. `parse_loc_string` gained `?macros ?from_raw_pos`;
+  `magic_comments_to_cn_toplevel` gained `?macro_defns ?from_raw_pos` and looks up
+  the in-scope table by the magic loc's `pos_bol`. `feed_parse`'s `show_token` now
+  keys spellings by `(file, pos_cnum)` (stable under eager resolution) so CN error
+  messages keep their "after 'X' before 'Y'" lexemes.
+- Verified: a macro used in a top-level `/*@ spec … @*/` expands (internal errors
+  show the *expanded* tokens / parse states; external show the literal), with
+  source-accurate carets.  `tests/cpp/0005` (object-like) and `0006` (function-
+  like) cover it; `run-cpp.sh` runs the cpp-only group with `at_magic_comments`.
+  Status: `run-ci.sh` 188/0, `run-cpp.sh` 194/0, cscout 44/76.
+- Known limitation (accepted): no "expanded from:" notes *inside* CN diagnostics
+  (eager resolution drops the chain; lex errors keep theirs via
+  `Error_in_expansion`).  Statement/loop/call-site magic still unexpanded.
+
+#### Two implementation notes (both stem from Menhir's flat `Lexing.position`)
+
+**The `feed_parse` `spellings` table.** Menhir error messages ("unexpected token
+after 'X' and before 'Y'") get the X/Y lexemes from `MenhirLib.ErrorReports.wrap`,
+which records each token's `(start, end)` positions and later calls our
+`show_token (start, _)` to turn a position back into source text.  On the text
+path that is a buffer slice (`text_show_token`), but `feed_parse` drives Menhir
+against an *empty* `dummy` lexbuf — there is no buffer — so `show_token` needs a
+position→spelling side lookup.  The original lookup keyed `raw_loc_map` by
+`start.pos_bol`, which works in **lazy** mode (the dummy carries the raw position,
+whose `pos_bol` *is* the synthetic key) but **fails in eager mode**: the fragment
+supplier writes resolved positions, so `pos_bol` has been swapped for the real line
+start and the key-lookup misses (→ "after '' and before ''").  Fix: `finish` only
+ever rewrites `pos_bol`, never `pos_cnum`, so `(pos_fname, pos_cnum)` is identical
+raw or resolved.  `spellings : (string * int, string) Hashtbl` is keyed on that
+pair, populated by the supplier as it emits each real token (it still holds the raw
+key there, so it fetches the lexeme from `raw_loc_map`), and read by `show_token` —
+uniform across both modes.  It is *local* mutable state inside one `feed_parse`
+call (same category as the `rest` ref and the `dummy` mutation), not threaded
+across modules/stages.
+
+**Why CN diagnostics inside a magic comment carry no macro chain.** The
+"expanded from:" notes live in the `expansions` list on a `Cerb_position.t`, but
+Menhir hands semantic actions only a flat `Lexing.position`, which has nowhere to
+hold that list.  The main path copes by *defer-and-recover*: the synthetic
+`pos_bol` key rides through the parser inside the `Lexing.position`, and a single
+post-pass (`Cabs_location_map.from_raw`) walks the AST and rebuilds each position
+into a `Cerb_position.t` *with* its chain.  The fragment can't use that pass —
+`from_raw` takes a `TUnit` and **deliberately skips CN subtrees** (a CN-aware
+traversal would be its own project), and `cn_toplevel` returns CN decls, not a
+`TUnit`.  So the fragment resolves **eagerly** instead: the supplier itself does
+`to_file_lexing (from_raw map p)` and writes a *plain `Lexing.position`* — correct
+columns, but the chain `from_raw` computed is discarded at that flat-position
+bottleneck.  Hence parser errors and resolved CN AST nodes get accurate
+file:line:column but no notes.  The one exception is a **lex** error inside an
+expansion: it never goes through that bottleneck — the supplier catches it and
+raises `Error_in_expansion (err, pos)` with a full `Cerb_position.t` (built by
+`from_raw` + `shift_innermost_caret`), so its chain survives.  Getting chains
+everywhere would need either lazy resolution plus a CN-aware position post-pass, or
+a position type richer than `Lexing.position` through Menhir (which its API
+forecloses).
+
+- **Remaining after C17:** C18 (trigraphs + backslash-newline splicing, phases 1–2
+  pre-pass; unblocks `cpp01-trigtest` and the remaining cscout goldens); statement/
+  loop/call-site magic-comment expansion (needs `macro_defns` threaded into
+  `Cabs_to_ail`); “expanded from:” notes *inside* CN (needs a CN-aware position
+  traversal or lazy resolution for the fragment). Lower priority: honour
+  `conf.cpp_save` on the internal path; simplify `parse_tokens`.
 
 ### Integration revision (approved 2026-05-30)
 

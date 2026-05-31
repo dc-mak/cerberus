@@ -31,10 +31,26 @@ type raw_loc_map
 
 val lookup : raw_loc_map -> int -> entry option
 
+(* The macro environment in scope at each top-level magic comment, so its CN
+   payload can be macro-expanded on re-parse.  Immutable and keyed by the magic
+   token's synthetic [pos_bol] key — the same key its CERB_MAGIC location carries
+   into the AST, so the re-parser recovers the table from the parsed location.
+   Only magic comments have an entry; ordinary tokens are absent. *)
+type macro_defns
+
+val find_macro_defns : macro_defns -> int -> Macro_table.t option
+
 val preprocess :
   include_dirs:string list ->
   predefined:(string * string option) list ->
   undefs:string list ->
   forced_includes:string list ->
   filename:string ->
-  Location.t Token.t list * raw_loc_map
+  Location.t Token.t list * raw_loc_map * macro_defns
+
+(* Lex and macro-expand a magic comment's CN payload with the given in-scope
+   macro table, yielding the located tokens + raw_loc_map the parser feed
+   consumes.  [lexbuf] must already be positioned (filename + start) at the
+   payload's place in the original file. *)
+val expand_fragment :
+  Macro_table.t -> Lexing.lexbuf -> Location.t Token.t list * raw_loc_map

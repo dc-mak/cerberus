@@ -1,0 +1,4 @@
+cpp/0006-magic-comment-macro-arg.error.c:3:41: error: unexpected token after '0i32' and before 'bad'
+Please add error message for state 1051 to parsers/c/c_parser_error.messages
+/*@ spec g(i32 x); requires GE(x, 0i32) bad; @*/
+                                        ^~~ 

@@ -1,0 +1,4 @@
+cpp/0005-magic-comment-macro.error.c:3:24: error: unexpected token after 'requires' and before ';'
+parsing "cn_fun_spec": seen "CN_SPEC UNAME VARIABLE LPAREN cn_args RPAREN SEMICOLON CN_REQUIRES", expecting "nonempty_list(condition) CN_ENSURES nonempty_list(condition)"
+/*@ spec f(i32 x); REQ ; @*/
+                       ^ 
