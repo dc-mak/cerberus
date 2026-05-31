@@ -737,6 +737,17 @@ tokens.
     `[[` is lexed as one token in `preproc_lexer` (LBRACK_LBRACK kept — two-LBRACK
     grammar gives 56 array-vs-attribute conflicts).  Strings/chars lexed
     leniently so invalid escapes don't crash the feed.
+  - **LineMap global removed (2026-05-31):** `c_lexer` no longer maintains a line
+    map.  Preprocessing is done before the lexer runs, so positions are real: the
+    `#` line-marker rule sets `pos_fname`/`pos_lnum` directly (verified an error
+    in an `#include`d header still reports the header), and `pos` in the grammar
+    is `Cerb_position.from_lexing`.  `C_lexer.flags` gains an `enrich` field;
+    `create_lexer ~enrich` returns the lexer plus the `to_pos` it uses for error
+    messages.  `c_parser_driver` no longer references `C_lexer.LineMap`; `handle`
+    takes `~to_pos ~show_token`, and `parse_tokens` receives the token feed (the
+    preprocessor's source-position "line map", built by `Preproc_token_feed.make`
+    in `pipeline`).  **TODO:** the CN re-parse story (`parse_loc_string` /
+    `magic_comments_to_cn_toplevel`) under this scheme still needs figuring out.
   - **TODOs (deferred, agreed with user):** (1) a *lazy* scheme mapping positions
     only just before printing, and/or a *switch* between eager/lazy (eager chosen
     now for simplicity + zero API change for library backends); (2) once the
