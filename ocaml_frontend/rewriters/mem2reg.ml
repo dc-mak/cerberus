@@ -80,15 +80,15 @@ let action_escaping_syms act_ =
       pe_free_syms addr_pe
   in
   match act_ with
-  | Store0 (_, ctype_pe, addr_pe, val_pe, _) ->
-      Pset.union (addr_indirect addr_pe) (pes_free_syms [ctype_pe; val_pe])
+  | Store0 (_, _, addr_pe, val_pe, _) ->
+      Pset.union (addr_indirect addr_pe) (pe_free_syms val_pe)
   | Kill (_, addr_pe) ->
       addr_indirect addr_pe
-  | Load0 (ctype_pe, addr_pe, _) ->
-      Pset.union (addr_indirect addr_pe) (pe_free_syms ctype_pe)
-  | SeqRMW (_, ty_pe, addr_pe, bound, upd_pe) ->
+  | Load0 (_, addr_pe, _) ->
+      addr_indirect addr_pe
+  | SeqRMW (_, _, addr_pe, bound, upd_pe) ->
       Pset.remove bound @@
-      Pset.union (addr_indirect addr_pe) (pes_free_syms [ty_pe; upd_pe])
+      Pset.union (addr_indirect addr_pe) (pe_free_syms upd_pe)
   | Create (pe1, pe2, _) | Alloc0 (pe1, pe2, _)
   | LinuxLoad (pe1, pe2, _) ->
       pes_free_syms [pe1; pe2]
@@ -329,20 +329,23 @@ let update_syms syms footprint =
     syms
 
 module Event = struct
-  type t = Neg_store | Pos_store | Load
+  type t = Neg_store | Pos_store | Load | Kill
   let is_neg_store = function Neg_store -> true | _ -> false
   let is_load = function Load -> true | _ -> false
+  let is_kill = function Kill -> true | _ -> false
   let compare x y =
     let num = function
     | Neg_store -> 0
     | Pos_store -> 1
-    | Load -> 2 in
+    | Load -> 2
+    | Kill -> 3 in
     Int.compare (num x) (num y)
 
   let _to_string = function
     | Neg_store -> "N"
     | Pos_store -> "P"
     | Load -> "O"
+    | Kill -> "K"
 end
 
 module Event_set = Set.Make(Event)
@@ -368,7 +371,8 @@ let union_footprint = function
 
 (* [sequence syms e] returns a map whose keys are a subset of [syms] touched by
    [e]. The values of the map are either error, signalling that the symbol is
-   not sequentialisable, or an event set of memory events. *)
+   not sequentialisable, or an event set of memory events.
+   Note that this does not check for uninit reads, or use-after-kills. *)
 let rec sequence syms (Expr (annots, e_) as _e) =
   let module Es = Event_set in
   match e_ with
@@ -395,6 +399,12 @@ let rec sequence syms (Expr (annots, e_) as _e) =
             (get_sym addr_pe)
             (Ok (Es.of_list [Event.Pos_store; Event.Load]))
              sym_empty_map
+      | Kill (_, addr_pe)
+        when pesym_mem addr_pe syms ->
+          Pmap.add
+            (get_sym addr_pe)
+            (Ok (Es.singleton Event.Kill))
+             sym_empty_map
       | _ ->
           sym_empty_map
       end
@@ -419,6 +429,12 @@ let rec sequence syms (Expr (annots, e_) as _e) =
           Ok (Es.union ev1 ev2) in
       combine_map union_if_no_race footprint1 footprint2
 
+  (* Function calls are not checked for sequencing errors because:
+     (a) indeterminate sequencing is allowed/not UB
+     (b) that can only happen with global vars and this analysis
+         is limited to function local ones (whose address has not escaped,
+         including not being pased to a function)
+     Also it would be very non-compositional. *)
   | Epure _ | Ememop _ | Eccall _ | Eproc _ | Ewait _ | Eexcluded _
   | End _ (* always true/false *) ->
       sym_empty_map
@@ -431,10 +447,35 @@ let rec sequence syms (Expr (annots, e_) as _e) =
       sequence syms e
 
   | Eif (_, e1, e2) ->
-      union_footprint @@ List.map (sequence syms) [e1; e2]
+      let footprint1 = sequence syms e1 in
+      let syms1 = update_syms syms footprint1 in
+      let footprint2 = sequence syms1 e2 in
+      let union_if_no_race ev1 ev2 =
+        let ( let* ) = Result.bind in
+        let* ev1 in
+        let* ev2 in
+        match Es.exists Event.is_kill ev1, Es.exists Event.is_kill ev2 with
+        | (false, true) | (true, false) ->
+            (* both kill or both don't kill *)
+            Error ()
+        | (true, true) | (false, false) ->
+            Ok (Es.union ev1 ev2) in
+      combine_map union_if_no_race footprint1 footprint2
 
   | Ecase (_, arms) ->
-      union_footprint @@ List.map (fun (_, e) -> sequence syms e) arms
+      arms
+      |> List.map (fun (_, e) -> sequence syms e)
+      |> List.map (Pmap.map (Result.map (fun x -> [x])))
+      |> List.fold_left (combine_map (res_lift2 List.append)) (sym_empty_map)
+      |> Pmap.map (fun fs ->
+          Result.bind fs (fun fs ->
+              let has_kills = List.map (Es.exists Event.is_kill) fs in
+              let all_kill = List.for_all Fun.id has_kills in
+              let none_kill = List.for_all not has_kills in
+              if not all_kill && not none_kill then
+                Error ()
+              else
+                Ok (List.fold_left Es.union Es.empty fs)))
 
   | Epar arms | Eunseq arms ->
       arms
@@ -576,10 +617,12 @@ let bty_of_pat pat =
   | Exception.Result (Some bty) -> bty
   | _ -> assert false (* elaboration guarantee *)
 
-let update_env env matched =
-  List.fold_left (fun env (old, new_) ->
-      let pe = Pexpr ([], (), PEsym new_) in
-      Pmap.add old pe env) env matched
+let update_env env matched killed =
+  Pmap.filter
+    (fun x _ -> not (Pset.mem x killed)) @@
+    List.fold_left (fun env (old, new_) ->
+        let pe = Pexpr ([], (), PEsym new_) in
+        Pmap.add old pe env) env matched
 
 let rec update_cbt cbt delta =
   match delta with
@@ -593,7 +636,25 @@ let rec update_cbt cbt delta =
     | BTy_tuple cbts -> BTy_tuple (List.map2 update_cbt cbts deltas)
     | _ -> assert false
 
-let transform_fun bty syms e =
+let maybe_strict strict_reads loc bty pe =
+  let bty = match bty with
+    | BTy_loaded bty -> BTy_object bty
+    | _ -> assert false in
+  if strict_reads then
+    let spec = (Pattern ([], CaseCtor (Cspecified, [Pattern ([], CaseBase (None, bty))])), pe) in
+    let unspec =
+        ( Pattern ([], CaseCtor (Cunspecified, [Pattern ([], CaseBase (None, BTy_ctype))]))
+        , Pexpr ([], (), PEundef (loc, Undefined.UB011_use_indeterminate_automatic_object)) ) in
+    Pexpr ([], (), PEcase (pe, [spec; unspec]))
+  else
+    pe
+
+let transform_fun strict_reads bty syms e =
+  let rec list_split3 = function
+    | [] -> ([], [], [])
+    | (x,y,z)::l ->
+        let (rx, ry, rz) = list_split3 l in
+       (x::rx, y::ry, z::rz) in
   let cbt_to_bty x = BTy_loaded (Option.get @@ Core_aux.core_object_type_of_ctype x) in
   let bty_env = ref sym_empty_map in
   let existing = Extended None in
@@ -603,16 +664,19 @@ let transform_fun bty syms e =
         let is_return =
           List.exists (function Annot.Alabel LAreturn -> true | _ -> false) e_annot in
         if is_return then
-          (Expr (e_annot, Esave ((label_sym, cbt), params, body)), existing)
+          (Expr (e_annot, Esave ((label_sym, cbt), params, body)), existing, sym_empty_set)
         else
           let sub_arg (sym, ((_, opt) as info, arg)) (promoted, params, val_env) =
-            match Pmap.lookup sym val_env with
-            | None -> (promoted, (sym, (info, arg)) :: params, val_env)
-            | Some arg ->
+            if Pset.mem sym syms then
+                let arg =
+                  let default = Pexpr ([], (), PEundef (Annot.get_loc_ e_annot, Undefined.UB010_pointer_to_dead_object)) in
+                  Option.value (Pmap.lookup sym val_env) ~default in
                 let bty = pmap_find sym !bty_env in
                 let self = Pexpr ([], (), PEsym sym) in
                 let val_env = Pmap.add sym self val_env in
-                (sym :: promoted, (sym, ((bty, opt), arg)) :: params, val_env) in
+                (sym :: promoted, (sym, ((bty, opt), arg)) :: params, val_env)
+            else
+            (promoted, (sym, (info, arg)) :: params, val_env) in
           let (promoted, params, val_env) = List.fold_right sub_arg params ([], [], val_env) in
           let promoted_set = sym_set_of_list promoted in
           assert (Pset.subset written promoted_set);
@@ -626,10 +690,8 @@ let transform_fun bty syms e =
                  `-PEctor Tuple
                    |-PEsym ret{572} -- out of scope after a run!
                    `-PEsym n{573} *)
-          let (body, delta) = transform bty val_env promoted_set body in
-          (* cbt annotation seems to be unused for type-checking, so not
-             worth computing a new one based on delta *)
-          (Expr (e_annot, Esave ((label_sym, update_cbt cbt delta), params, body)), delta)
+          let (body, delta, killed) = transform bty val_env promoted_set body in
+          (Expr (e_annot, Esave ((label_sym, update_cbt cbt delta), params, body)), delta, killed)
 
     | Esseq (
         (Pattern (_, CaseBase (Some sym, _)) as pat),
@@ -641,74 +703,95 @@ let transform_fun bty syms e =
           let peval = Pexpr ([], (), PEval (Vloaded (LVunspecified ct))) in
           bty_env := Pmap.add sym (cbt_to_bty ct) !bty_env;
           let val_env = Pmap.add sym peval val_env in
-          transform bty val_env written body
+          let (body, delta, killed) = transform bty val_env written body in
+          (body, delta, Pset.remove sym killed)
         else
-          let (body, delta) = transform bty val_env written body in
-          (Expr (e_annot, Esseq (pat, e1, body)), delta)
+          let (body, delta, killed) = transform bty val_env written body in
+          (Expr (e_annot, Esseq (pat, e1, body)), delta, killed)
 
-    | Eaction (Paction (_, Action (_, _, act_))) ->
+    | Eaction (Paction (_, Action (loc, _, act_))) ->
         begin match act_ with
         | Store0 (_, _, addr_pe, val_pe, _)
           when pesym_mem addr_pe syms ->
-            assert (Pmap.mem (get_sym addr_pe) !bty_env && Pmap.mem (get_sym addr_pe) val_env);
-            let pe = Pexpr ([], (), PEval Vunit) in
-	    let sym = get_sym addr_pe in
-            let (written, val_env) = (Pset.add sym written, Pmap.add sym val_pe val_env) in
-            let (pe, delta) = extend_pe_delta pe !bty_env val_env written in
-            (Expr (e_annot, Epure pe), delta)
+            assert (Pmap.mem (get_sym addr_pe) !bty_env);
+            let sym = get_sym addr_pe in
+            if Pmap.mem sym val_env then
+              let pe = Pexpr ([], (), PEval Vunit) in
+              let (written, val_env) = (Pset.add sym written, Pmap.add sym val_pe val_env) in
+              let (pe, delta) = extend_pe_delta pe !bty_env val_env written in
+              (Expr (e_annot, Epure pe), delta, sym_empty_set)
+            else
+              let pe = Pexpr ([], (), PEundef (loc, Undefined.UB010_pointer_to_dead_object)) in
+              (Expr (e_annot, Epure pe), existing, sym_empty_set)
 
         | Load0 (_, addr_pe, _)
           when pesym_mem addr_pe syms ->
-            let pe = pmap_find (get_sym addr_pe) val_env in
-            let (pe, delta) = extend_pe_delta pe !bty_env val_env written in
-            (Expr (e_annot, Epure pe), delta)
+            begin match Pmap.lookup (get_sym addr_pe) val_env with
+            | Some pe ->
+                let pe = maybe_strict strict_reads loc bty pe in
+                let (pe, delta) = extend_pe_delta pe !bty_env val_env written in
+                (Expr (e_annot, Epure pe), delta, sym_empty_set)
+            | None ->
+                let pe = Pexpr ([], (), PEundef (loc, Undefined.UB010_pointer_to_dead_object)) in
+                (Expr (e_annot, Epure pe), existing, sym_empty_set)
+            end
+
 
         | SeqRMW (fwd, _, addr_pe, x_sym, new_pe)
           when pesym_mem addr_pe syms ->
             let sym = get_sym addr_pe in
-            assert (Pmap.mem sym !bty_env && Pmap.mem sym val_env);
-            let prev_pe = pmap_find (get_sym addr_pe) val_env in
-            let written = Pset.add sym written in
-            let (val_env, pe) =
-              (* could use Elet to avoid double-eval of val_pe if fwd = true *)
-              let val_pe = Core_aux.unsafe_subst_sym_pexpr x_sym prev_pe new_pe in
-              (Pmap.add sym val_pe val_env, if fwd then val_pe else prev_pe) in
-            let (pe, delta) = extend_pe_delta pe !bty_env val_env (Pset.add sym written) in
-            (Expr (e_annot, Epure pe), delta)
+            assert (Pmap.mem sym !bty_env);
+            if Pmap.mem sym val_env then
+              let prev_pe = pmap_find sym val_env in
+              let written = Pset.add sym written in
+              let (val_env, pe) =
+                (* could use Elet to avoid double-eval of val_pe if fwd = true *)
+                let val_pe = Core_aux.unsafe_subst_sym_pexpr x_sym prev_pe new_pe in
+                (Pmap.add sym val_pe val_env, if fwd then val_pe else prev_pe) in
+              let (pe, delta) = extend_pe_delta pe !bty_env val_env (Pset.add sym written) in
+              (Expr (e_annot, Epure pe), delta, sym_empty_set)
+            else
+              let pe = Pexpr ([], (), PEundef (loc, Undefined.UB010_pointer_to_dead_object)) in
+              (Expr (e_annot, Epure pe), existing, sym_empty_set)
 
         | Kill (_, addr_pe)
           when pesym_mem addr_pe syms ->
-            let pe = Pexpr ([], (), PEval Vunit) in
-            let written = Pset.remove (get_sym addr_pe) written in
-            let (pe, delta) = extend_pe_delta pe !bty_env val_env written in
-            (Expr (e_annot, Epure pe), delta)
+            let sym = get_sym addr_pe in
+            if Pmap.mem sym val_env then
+              let pe = Pexpr ([], (), PEval Vunit) in
+              let written = Pset.remove sym written in
+              let (pe, delta) = extend_pe_delta pe !bty_env val_env written in
+              (Expr (e_annot, Epure pe), delta, sym_singleton sym)
+            else
+              let pe = Pexpr ([], (), PEundef (loc, Undefined.UB010_pointer_to_dead_object)) in
+              (Expr (e_annot, Epure pe), existing, sym_empty_set)
 
         | _ ->
             if Pset.is_empty written then
-              (Expr (e_annot, e_), existing)
+              (Expr (e_annot, e_), existing, sym_empty_set)
             else
               let sym = Symbol.fresh_pretty "act" in
               let pe = Pexpr ([], (), if is_unit_bty bty then (PEval Vunit) else (PEsym sym)) in
               let pat = Pattern ([], CaseBase (Some sym, bty)) in
               let (pe, delta) = extend_pe_delta pe !bty_env val_env written in
-              (Expr ([], Ewseq (pat, Expr (e_annot, e_), Expr ([], Epure pe))), delta)
+              (Expr ([], Ewseq (pat, Expr (e_annot, e_), Expr ([], Epure pe))), delta, sym_empty_set)
         end
 
     | Epure pe ->
         let (pe, delta) = extend_pe_delta pe !bty_env val_env written in
-        (Expr (e_annot, Epure pe), delta)
+        (Expr (e_annot, Epure pe), delta, sym_empty_set)
 
     | Elet (pat, pe, e) ->
-        let (e, delta) = transform bty val_env written e in
-        (Expr (e_annot, Elet (pat, pe, e)), delta)
+        let (e, delta, killed) = transform bty val_env written e in
+        (Expr (e_annot, Elet (pat, pe, e)), delta, killed)
 
     | Eunseq es ->
         assert (Pset.is_empty written);
         begin match bty with
         | BTy_tuple btys ->
-            let (es, deltas) = List.split @@ List.map2 (fun bty e ->
+            let (es, deltas, killeds) = list_split3 @@ List.map2 (fun bty e ->
                 transform bty val_env written e) btys es in
-            (Expr (e_annot, Eunseq es), Tuple deltas)
+            (Expr (e_annot, Eunseq es), Tuple deltas, List.fold_left Pset.union sym_empty_set killeds)
         | _ -> assert false
         end
 
@@ -716,104 +799,105 @@ let transform_fun bty syms e =
         assert (Pset.is_empty written);
         begin match bty with
         | BTy_tuple btys ->
-            let (es, deltas) = List.split @@ List.map2 (fun bty e ->
+            let (es, deltas, killeds) = list_split3 @@ List.map2 (fun bty e ->
                 transform bty val_env written e) btys es in
-            (Expr (e_annot, Epar es), Tuple deltas)
+            (Expr (e_annot, Epar es), Tuple deltas, List.fold_left Pset.union sym_empty_set killeds)
         | _ -> assert false
         end
 
     | Eif (pe, e1, e2) ->
-        let (wrap_info, inner_w) = List.split @@ List.map (fun e ->
-          let (e, delta) = transform bty val_env sym_empty_set e in
+        let (wrap_info, inner_w, inner_k) = list_split3 @@ List.map (fun e ->
+          let (e, delta, killed) = transform bty val_env sym_empty_set e in
           let (res_sym, res_pat) =
             if is_unit_bty bty then
               (None, Pattern ([], CaseBase (None, bty)))
             else
-              let res_sym = Some (Symbol.fresh_pretty "if") in
+              let res_sym = Some (Symbol.fresh_pretty "if_") in
               let res_pat = Pattern ([], CaseBase (res_sym, bty)) in
               (res_sym, res_pat) in
           let (matched, pat) = update_pat res_pat delta in
-          let val_env = update_env val_env matched in
+          (* DON'T KILL IN [val_env] *)
+          let val_env = update_env val_env matched sym_empty_set in
           let written = sym_set_of_list (List.map fst matched) in
-          ((res_sym, val_env, pat, e), written)) [e1; e2] in
+          ((res_sym, val_env, pat, e), written, killed)) [e1; e2] in
         let inner_ws = List.fold_left Pset.union written inner_w in
+        let killed = List.fold_left Pset.union sym_empty_set inner_k in
         if Pset.is_empty inner_ws then
           let es = List.map (fun (_, _, _, e) -> e) wrap_info in
-          (Expr (e_annot, Eif (pe, List.nth es 0, List.nth es 1)), existing)
+          (Expr (e_annot, Eif (pe, List.nth es 0, List.nth es 1)), existing, killed)
         else
-          let written = Pset.filter (fun sym -> Pmap.mem sym val_env) inner_ws in
           let (es, deltas) = List.split @@ List.map (fun (res_sym, val_env, pat, e) ->
               let pe = Option.fold res_sym ~none:(PEval Vunit) ~some:(fun res_sym -> (PEsym res_sym)) in
               let (pe, delta) = extend_pe_delta (Pexpr ([], (), pe)) !bty_env val_env written in
               (Expr ([], Esseq (pat, e, Expr ([], Epure pe))), delta)) wrap_info in
-          (Expr (e_annot, Eif (pe, List.nth es 0, List.nth es 1)), List.hd deltas)
+          (Expr (e_annot, Eif (pe, List.nth es 0, List.nth es 1)), List.hd deltas, killed)
 
     | Ecase (pe, arms) ->
         let (pats, es_deltas) = List.split @@ List.map (fun (pat, e) ->
           (pat, transform bty val_env sym_empty_set e)) arms in
-        let (wrap_info, inner_w) = List.split @@ List.map (fun (e, delta) ->
+        let (wrap_info, inner_w, inner_k) = list_split3 @@ List.map (fun (e, delta, killed) ->
           let (res_sym, res_pat) =
             if is_unit_bty bty then
               (None, Pattern ([], CaseBase (None, bty)))
             else
-              let res_sym = Symbol.fresh_pretty "if" in
+              let res_sym = Symbol.fresh_pretty "case_" in
               let res_pat = Pattern ([], CaseBase (Some res_sym, bty)) in
               (Some res_sym, res_pat) in
           let (matched, pat) = update_pat res_pat delta in
-          let val_env = update_env val_env matched in
+          let val_env = update_env val_env matched killed in
           let written = sym_set_of_list (List.map fst matched) in
-          ((res_sym, val_env, pat, e), written)) es_deltas in
-        let inner_ws = List.fold_left Pset.union written inner_w in
-        if Pset.is_empty inner_ws then
+          ((res_sym, val_env, pat, e), written, killed)) es_deltas in
+        let written = List.fold_left Pset.union written inner_w in
+        let killed = List.fold_left Pset.union sym_empty_set inner_k in
+        if Pset.is_empty written then
           let es = List.map (fun (_, _, _, e) -> e) wrap_info in
-          (Expr (e_annot, Ecase (pe, List.combine pats es)), existing)
+          (Expr (e_annot, Ecase (pe, List.combine pats es)), existing, killed)
         else
-          let written = Pset.filter (fun sym -> Pmap.mem sym val_env) inner_ws in
           let (es, deltas) = List.split @@ List.map (fun (res_sym, val_env, pat, e) ->
               let pe = Option.fold res_sym ~none:(PEval Vunit) ~some:(fun res_sym -> (PEsym res_sym)) in
               let (pe, delta) = extend_pe_delta (Pexpr ([], (), pe)) !bty_env val_env written in
               (Expr ([], Esseq (pat, e, Expr ([], Epure pe))), delta)) wrap_info in
-          (Expr (e_annot, Ecase (pe, List.combine pats es)), List.hd deltas)
+          (Expr (e_annot, Ecase (pe, List.combine pats es)), List.hd deltas, killed)
 
     | Ememop _ | Eccall _ | Eproc _ | Ewait _ | Eexcluded _
     | End _ (* always true/false *) ->
         assert (Pset.is_empty written);
-        (Expr (e_annot, e_), existing)
+        (Expr (e_annot, e_), existing, sym_empty_set)
 
     | Erun (a, label_sym, args) ->
-        let replace = function
-          | Pexpr ([], (), PEsym sym) as arg ->
-              (match Pmap.lookup sym val_env with
-                | None -> arg
-                | Some pe -> pe)
-          | arg -> arg in
-        (Expr (e_annot, Erun (a, label_sym, List.map replace args)), existing)
+        let replace arg =
+          if pesym_mem arg syms then
+            (match Pmap.lookup (get_sym arg) val_env with
+             | None -> Pexpr ([], (), PEundef (Annot.get_loc_ e_annot, Undefined.UB010_pointer_to_dead_object))
+             | Some pe -> pe)
+          else
+            arg in
+        (Expr (e_annot, Erun (a, label_sym, List.map replace args)), existing, sym_empty_set)
 
     | Ewseq (pat, e1, e2) ->
-       let (e1, delta) = transform (bty_of_pat pat) val_env sym_empty_set e1 in
+       let (e1, delta, killed1) = transform (bty_of_pat pat) val_env sym_empty_set e1 in
        let (matched, pat) = update_pat pat delta in
+       let val_env = update_env val_env matched killed1 in
        let written = Pset.union (sym_set_of_list (List.map fst matched)) written in
-       let val_env = update_env val_env matched in
-       let (e2, delta) = transform bty val_env written e2 in
-       (Expr (e_annot, Ewseq (pat, e1, e2)), delta)
+       let (e2, delta, killed2) = transform bty val_env (Pset.diff written killed1) e2 in
+       (Expr (e_annot, Ewseq (pat, e1, e2)), delta, Pset.union killed1 killed2)
 
     | Esseq (pat, e1, e2) ->
-       let (e1, delta) = transform (bty_of_pat pat) val_env sym_empty_set e1 in
+       let (e1, delta, killed1) = transform (bty_of_pat pat) val_env sym_empty_set e1 in
        let (matched, pat) = update_pat pat delta in
+       let val_env = update_env val_env matched killed1 in
        let written = Pset.union (sym_set_of_list (List.map fst matched)) written in
-       let val_env = update_env val_env matched in
-       let (e2, delta) = transform bty val_env written e2 in
-       (Expr (e_annot, Esseq (pat, e1, e2)), delta)
+       let (e2, delta, killed2) = transform bty val_env (Pset.diff written killed1) e2 in
+       (Expr (e_annot, Esseq (pat, e1, e2)), delta, Pset.union killed1 killed2)
 
     | Ebound e ->
-        let (e, delta) = transform bty val_env written e in
-        (Expr (e_annot, Ebound e), delta)
+        let (e, delta, killed) = transform bty val_env written e in
+        (Expr (e_annot, Ebound e), delta, killed)
 
     | Eannot (a, e) ->
-        let (e, delta) = transform bty val_env written e in
-        (Expr (e_annot, Eannot (a, e)), delta)
+        let (e, delta, killed) = transform bty val_env written e in
+        (Expr (e_annot, Eannot (a, e)), delta, killed) in
 
-  in
   transform bty sym_empty_map sym_empty_set e
 
 let analyse_file file =
@@ -832,7 +916,7 @@ let analyse_file file =
     | Fun _ | ProcDecl _ | BuiltinDecl _ ->
         map) file.funs sym_empty_map
 
-let transform_file file =
+let transform_file ~strict_reads file =
   let analysis = analyse_file file in
   let funs = Pmap.mapi (fun f_sym decl ->
     match decl with
@@ -842,7 +926,9 @@ let transform_file file =
         | None ->
             decl
         | Some promotable ->
-            let (body, _) = transform_fun ret_bt (sym_set_of_list promotable) body in
+            let pp_sym x = Cerb_pp_prelude.(!^ (Pp_symbol.to_string x)) in
+            Cerb_debug.print_debug 0 [] (fun () -> "promotable " ^ Pp_utils.to_plain_pretty_string (Cerb_pp_prelude.semi_list pp_sym promotable));
+            let (body, _, _) = transform_fun strict_reads ret_bt (sym_set_of_list promotable) body in
             Proc (loc, env_marker, ret_bt, args, body)
         end
     | Fun _ | ProcDecl _ | BuiltinDecl _ ->
