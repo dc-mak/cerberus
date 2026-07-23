@@ -80,15 +80,15 @@ let action_escaping_syms act_ =
       pe_free_syms addr_pe
   in
   match act_ with
-  | Store0 (_, ctype_pe, addr_pe, val_pe, _) ->
-      Pset.union (addr_indirect addr_pe) (pes_free_syms [ctype_pe; val_pe])
+  | Store0 (_, _, addr_pe, val_pe, _) ->
+      Pset.union (addr_indirect addr_pe) (pe_free_syms val_pe)
   | Kill (_, addr_pe) ->
       addr_indirect addr_pe
-  | Load0 (ctype_pe, addr_pe, _) ->
-      Pset.union (addr_indirect addr_pe) (pe_free_syms ctype_pe)
-  | SeqRMW (_, ty_pe, addr_pe, bound, upd_pe) ->
+  | Load0 (_, addr_pe, _) ->
+      addr_indirect addr_pe
+  | SeqRMW (_, _, addr_pe, bound, upd_pe) ->
       Pset.remove bound @@
-      Pset.union (addr_indirect addr_pe) (pes_free_syms [ty_pe; upd_pe])
+      Pset.union (addr_indirect addr_pe) (pe_free_syms upd_pe)
   | Create (pe1, pe2, _) | Alloc0 (pe1, pe2, _)
   | LinuxLoad (pe1, pe2, _) ->
       pes_free_syms [pe1; pe2]
@@ -368,13 +368,15 @@ let union_footprint = function
 
 (* [sequence syms e] returns a map whose keys are a subset of [syms] touched by
    [e]. The values of the map are either error, signalling that the symbol is
-   not sequentialisable, or an event set of memory events. *)
+   not sequentialisable, or an event set of memory events.
+   Note that this does not check for uninit reads, or use-after-kills. *)
 let rec sequence syms (Expr (annots, e_) as _e) =
   let module Es = Event_set in
   match e_ with
   | Eaction (Paction (polarity, Action (_, _, act_))) ->
       begin match act_ with
-      | Store0 (_, _, addr_pe, val_pe, _)
+      | Store0 (_, _, addr_pe, _, _)
+      | Kill (_, addr_pe)
         when pesym_mem addr_pe syms ->
           Pmap.add
             (get_sym addr_pe)
@@ -419,6 +421,12 @@ let rec sequence syms (Expr (annots, e_) as _e) =
           Ok (Es.union ev1 ev2) in
       combine_map union_if_no_race footprint1 footprint2
 
+  (* Function calls are not checked for sequencing errors because:
+     (a) indeterminate sequencing is allowed/not UB
+     (b) that can only happen with global vars and this analysis
+         is limited to function local ones (whose address has not escaped,
+         including not being pased to a function)
+     Also it would be very non-compositional. *)
   | Epure _ | Ememop _ | Eccall _ | Eproc _ | Ewait _ | Eexcluded _
   | End _ (* always true/false *) ->
       sym_empty_map
@@ -493,7 +501,7 @@ let find_promotable ~also_fun_args f_sym body : Symbol.sym list =
   let not_seq =
       Pmap.domain @@
       Pmap.filter
-        (fun _ -> function Error _ -> true | (Ok _) -> false)
+        (fun _ r -> Result.is_error r)
         (sequence not_esc body) in
   assert (Pset.subset not_seq not_esc);
   (* The usual elaboration ensures that all C local var symbols are written to
@@ -593,7 +601,20 @@ let rec update_cbt cbt delta =
     | BTy_tuple cbts -> BTy_tuple (List.map2 update_cbt cbts deltas)
     | _ -> assert false
 
-let transform_fun bty syms e =
+let maybe_strict strict_reads loc bty pe =
+  let bty = match bty with
+    | BTy_loaded bty -> BTy_object bty
+    | _ -> assert false in
+  if strict_reads then
+    let spec = (Pattern ([], CaseCtor (Cspecified, [Pattern ([], CaseBase (None, bty))])), pe) in
+    let unspec =
+        ( Pattern ([], CaseCtor (Cunspecified, [Pattern ([], CaseBase (None, BTy_ctype))]))
+        , Pexpr ([], (), PEundef (loc, Undefined.UB011_use_indeterminate_automatic_object)) ) in
+    Pexpr ([], (), PEcase (pe, [spec; unspec]))
+  else
+    pe
+
+let transform_fun strict_reads bty syms e =
   let cbt_to_bty x = BTy_loaded (Option.get @@ Core_aux.core_object_type_of_ctype x) in
   let bty_env = ref sym_empty_map in
   let existing = Extended None in
@@ -646,13 +667,13 @@ let transform_fun bty syms e =
           let (body, delta) = transform bty val_env written body in
           (Expr (e_annot, Esseq (pat, e1, body)), delta)
 
-    | Eaction (Paction (_, Action (_, _, act_))) ->
+    | Eaction (Paction (_, Action (loc, _, act_))) ->
         begin match act_ with
         | Store0 (_, _, addr_pe, val_pe, _)
           when pesym_mem addr_pe syms ->
             assert (Pmap.mem (get_sym addr_pe) !bty_env && Pmap.mem (get_sym addr_pe) val_env);
             let pe = Pexpr ([], (), PEval Vunit) in
-	    let sym = get_sym addr_pe in
+            let sym = get_sym addr_pe in
             let (written, val_env) = (Pset.add sym written, Pmap.add sym val_pe val_env) in
             let (pe, delta) = extend_pe_delta pe !bty_env val_env written in
             (Expr (e_annot, Epure pe), delta)
@@ -660,6 +681,7 @@ let transform_fun bty syms e =
         | Load0 (_, addr_pe, _)
           when pesym_mem addr_pe syms ->
             let pe = pmap_find (get_sym addr_pe) val_env in
+            let pe = maybe_strict strict_reads loc bty pe in
             let (pe, delta) = extend_pe_delta pe !bty_env val_env written in
             (Expr (e_annot, Epure pe), delta)
 
@@ -832,7 +854,7 @@ let analyse_file file =
     | Fun _ | ProcDecl _ | BuiltinDecl _ ->
         map) file.funs sym_empty_map
 
-let transform_file file =
+let transform_file ~strict_reads file =
   let analysis = analyse_file file in
   let funs = Pmap.mapi (fun f_sym decl ->
     match decl with
@@ -842,7 +864,7 @@ let transform_file file =
         | None ->
             decl
         | Some promotable ->
-            let (body, _) = transform_fun ret_bt (sym_set_of_list promotable) body in
+            let (body, _) = transform_fun strict_reads ret_bt (sym_set_of_list promotable) body in
             Proc (loc, env_marker, ret_bt, args, body)
         end
     | Fun _ | ProcDecl _ | BuiltinDecl _ ->

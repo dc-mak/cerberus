@@ -569,7 +569,7 @@ let core_passes (conf, io) ~filename core_file =
       core_file in
   let core_file =
     if Switches.(has_switch SW_mem2reg) then
-      Mem2reg.transform_file core_file
+      Mem2reg.transform_file ~strict_reads:rm_unspecs core_file
     else
       core_file in
   Core_indet.hackish_order <$> begin
