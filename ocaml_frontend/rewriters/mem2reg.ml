@@ -491,6 +491,200 @@ let rec sequence syms (Expr (annots, e_) as _e) =
          symbols will be caught by the Esave analysis. *)
       sym_empty_map
 
+module State = struct
+  type t = Live | Killed | Unborn
+  let equal s1 s2 =
+    match s1, s2 with
+    | Live, Live
+    | Killed, Killed
+    | Unborn, Unborn -> true
+    | _ -> false
+end
+
+module Either = struct
+  include Stdlib.Either
+  let left_bind x f =
+    match x with
+    | Right _ -> x
+    | Left x -> f x
+end
+
+let pesym_mem' (Pexpr (_, _, pe_)) map =
+  match pe_ with
+  | PEsym s -> Option.map (fun r -> (s, r)) @@ Pmap.lookup s map
+  | _ -> None
+
+
+(* [might_uaf env e] is either (Left) an updated [env], if control returns from
+   [e], or (Right) a set of syms for which there is (potentially) a
+   use-after-free, if control does not return from [e] (i.e. [e] is an Erun).
+   The values of the map are either error, signalling that the symbol is used
+   after freeing, or a State.t for the local var at that point in the program.
+   Note that this does not check for uninit reads, or races. *)
+let rec might_uaf env (Expr (annots, e_) as _e) =
+  match e_ with
+    | Eaction (Paction (polarity, Action (_, _, act_))) ->
+        Either.left @@
+        begin match act_ with
+        | Store0 (_, _, addr_pe, _, _)
+        | Load0 (_, addr_pe, _)
+        | SeqRMW (_, _, addr_pe, _, _) ->
+            Option.fold (pesym_mem' addr_pe env) ~none:env ~some:(fun (sym, state) ->
+            let state = Result.bind state
+                (function State.Live -> Ok State.Live | _ -> Error ()) in
+            Pmap.add sym state env)
+
+        | Kill (_, addr_pe) ->
+            Option.fold (pesym_mem' addr_pe env) ~none:env ~some:(fun (sym, state) ->
+            let state = Result.bind state
+                (function State.Live -> Ok State.Killed | _ -> Error ()) in
+            Pmap.add sym state env)
+
+        | _ ->
+            env
+        end
+
+    | Esseq (
+        (Pattern (_, CaseBase (Some sym, _))),
+        (Expr (e_annot, Eaction (Paction (_, Action (_, _, Create (_, ct, _)))))),
+        body
+      ) when Pmap.mem sym env ->
+      let state = Result.bind (pmap_find  sym env)
+          (function State.Unborn -> Ok State.Live | _ -> Error ()) in
+      Either.left_bind (might_uaf (Pmap.add sym state env) body) (fun new_env ->
+          let state = Result.bind (pmap_find  sym new_env)
+              (function State.Unborn -> Error () | _ -> Ok State.Unborn) in
+          Either.left @@ Pmap.add sym state new_env)
+
+    | Esseq (_, e1, e2) | Ewseq (_, e1, e2) ->
+       (* Scoping handled above, so skipped here. *)
+       Either.left_bind (might_uaf env e1) (fun env -> might_uaf env e2)
+
+    (* Function calls are not checked for use-after-free errors because:
+       that can only happen with dynamically alloated vars and this analysis
+       is limited to function local ones (whose address has not escaped,
+       including not being pased to a function).
+       Also it would be very non-compositional. *)
+    | Epure _ | Ememop _ | Eccall _ | Eproc _ | Ewait _ | Eexcluded _
+    | End _ (* always true/false *) ->
+        Either.left env
+
+    | Elet (_, _, e) | Eannot (_, e) ->
+        might_uaf env e
+
+    | Ebound e ->
+        might_uaf env e
+
+    | Eif (_, e1, e2) ->
+        begin match might_uaf env e1, might_uaf env e2 with
+          | Right errs1, Right errs2 -> Right (Pset.union errs1 errs2)
+          | Right errs, (Left env) | (Left env), Right errs ->
+            Left (Pset.fold (fun sym env -> Pmap.add sym (Error ()) env) errs env)
+          | Left env1, Left env2 ->
+            Either.left @@
+            let union_if_agree _ s1 s2 =
+              (* Keys (syms) must match exactly - we never remove or add any new ones. *)
+              let s1 = Option.get s1 in
+              let s2 = Option.get s2 in
+              Option.some @@
+              let ( let* ) = Result.bind in
+              let* s1 in
+              let* s2 in
+              if State.equal s1 s2 then
+                Ok s1
+              else
+                Error () in
+            Pmap.merge union_if_agree env1 env2
+        end
+
+    | Epar arms | Eunseq arms ->
+        let results = List.map (might_uaf env) arms in
+        let (envs, errs) = List.partition_map Fun.id results in
+        let errs = List.fold_left Pset.union sym_empty_set errs in
+        begin match envs with
+          | [] -> Right errs
+          | _ :: _ ->
+            Either.left @@
+            (envs
+             |> List.map (Pmap.map (Result.map (fun x -> [x])))
+             |> List.fold_left (combine_map (res_lift2 List.append)) (sym_empty_map)
+             |> Pmap.map (fun fs -> Result.bind fs (fun fs ->
+                 let hd, tl = List.hd fs, List.tl fs in
+                 if List.for_all (State.equal hd) tl then
+                   Ok hd
+                 else
+                   Error ())))
+        end
+
+    | Ecase (_, arms) ->
+        let results = List.map (fun (_, e) -> might_uaf env e) arms in
+        let (envs, errs) = List.partition_map Fun.id results in
+        let errs = List.fold_left Pset.union sym_empty_set errs in
+        begin match envs with
+          | [] -> Right errs
+          | _ :: _ ->
+            Either.left @@
+            (envs
+             |> List.map (Pmap.map (Result.map (fun x -> [x])))
+             |> List.fold_left (combine_map (res_lift2 List.append)) (sym_empty_map)
+             |> Pmap.map (fun fs -> Result.bind fs (fun fs ->
+                 let hd, tl = List.hd fs, List.tl fs in
+                 if List.for_all (State.equal hd) tl then
+                   Ok hd
+                 else
+                   Error ())))
+        end
+
+    | Esave (_, params, body) ->
+        (* This relies on the fact that
+             1. C local var symbols are re-used across Esave-parameters,
+                Esave arguments, and Erun arguments.
+             2. [collect_info] ensures that the arguments are plain symbols.
+           This means we can
+             1. Ignore any parameter which is not in [syms].
+             2. Conflate the parameter symbols of the Esave, with the default
+                arguments of the Esave (for non-return Esaves).
+           NOTE: For return Esaves, since the body is always a pure expression,
+           the return parameter symbol will not end up in the footprint. *)
+        might_uaf env body
+
+    | Erun (_, label_sym, args) ->
+       (* Unlike [sequence], [might_uaf] needs to distinguish (non-monotonically) on
+          whether control returns from an execution path. Consider the below,
+          derived from tests/ci/0112-call_in_label.c
+
+             let x = create() in
+             let () = store(x, 1) in
+             let v =
+               if pe then
+                 let () = kill(x) in
+                 run l()
+               else
+                 load(x) in
+             (* use x *)
+
+          In this case, the first branch kills x, before a run, but the second
+          one doesn't. This mismatch is fine because control does not return
+          to the "let v" binder after the kill.
+
+          HOWEVER, any errors on the path to the run do need to be smuggled out.
+
+          This also relies on the fact that
+             1. C local var symbols are re-used across Esave-parameters.
+             2. [collect_info] ensures that the arguments are plain symbols.
+           This means we can conflate the parameter symbols of the Esave,
+           with the arguments of the Erun, i.e. I do not bother checking that
+           all the arguments are live at this point. *)
+        Right (Pmap.domain (Pmap.filter (fun _ r -> Result.is_error r) env))
+
+let might_uaf env e =
+  begin match might_uaf env e with
+    | Left env ->
+        Pmap.domain (Pmap.filter (fun _ r -> Result.is_error r) env)
+    | Right errs ->
+        errs
+  end
+
 let find_promotable ~also_fun_args f_sym body : Symbol.sym list =
   let creates = collect_info ~also_fun_args body in
   let not_esc =
@@ -504,12 +698,18 @@ let find_promotable ~also_fun_args f_sym body : Symbol.sym list =
         (fun _ r -> Result.is_error r)
         (sequence not_esc body) in
   assert (Pset.subset not_seq not_esc);
+  let maybe_uaf =
+    let env = Pmap.from_set (fun _ -> Ok State.Unborn) not_esc in
+    might_uaf env body in
+  (* The elaboration should not produce use-after-frees for local vars; this is
+   * just here as a defensive (and hopefully not too expensive) sanity check. *)
+  assert (Pset.is_empty maybe_uaf);
   (* The usual elaboration ensures that all C local var symbols are written to
      at least once, but not for the CN backend. This means that totally unused
      C local vars would have no footprint and not show up in the domain of the
      syms mapped to [Ok _]. Hence starting with not-escaped vars and removing
      not-sequence-able ones instead. *)
-  Pset.elements (Pset.diff not_esc not_seq)
+  Pset.elements (Pset.diff not_esc (Pset.union not_seq maybe_uaf))
 
 let get_ct (Pexpr (_, _, e_)) =
   match e_ with
