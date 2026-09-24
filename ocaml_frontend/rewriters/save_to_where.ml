@@ -8,18 +8,21 @@
      pure(pe) where defs end --> pure(val)
 
      [Jump-Sub]
+     pe => val
      defs(l) = x . E
      ----------------------------------------------
      jump l(pe) where defs end --> {val/x} E where defs
 
      [Jump-Where]
+     pe => val
      l not in defs
      ------------------------------------
-     jump l(pe) where defs end --> jump l(pe)
+     jump l(pe) where defs end --> jump l(val)
 
      [Jump-Let]
+     pe => val
      ---------------------------------------
-     lets _ = jump l(pe) in E --> jump l(pe)
+     lets _ = jump l(pe) in E --> jump l(val)
 
    Semantics are reminiscent of checked exceptions: jump
    propagates out through let-strong continuations until caught
@@ -338,7 +341,7 @@ let bTy_of_pat pat =
 
      save l (x := pe) in E ~> jump l(pe) where l(x) := E end
 
-   and then bubbling this outward, capturing (moving inside a label definiton)
+   and then bubbling this outward, capturing (moving inside a label definition)
    the continuation (layers of enclosing let strong pat = _ in E) of that
    expression until it reaches the dominating context of l.
 
